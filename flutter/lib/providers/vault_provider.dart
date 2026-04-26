@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../models/credential.dart';
-import '../utils/crypto_utils.dart';
 
 class VaultProvider extends ChangeNotifier {
   List<Credential> _credentials = [];
@@ -79,11 +78,9 @@ class VaultProvider extends ChangeNotifier {
   }
 
   Future<void> updateCredential(String oldSite, Credential newCredential) async {
-    // Delete old
-    await http.delete(Uri.parse('$baseUrl/credential/$oldSite'));
-    // Add new
-    final response = await http.post(
-      Uri.parse('$baseUrl/credential'),
+    final encoded = Uri.encodeComponent(oldSite);
+    final response = await http.put(
+      Uri.parse('$baseUrl/credential/$encoded'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({
         'site': newCredential.site,
@@ -103,7 +100,9 @@ class VaultProvider extends ChangeNotifier {
   }
 
   Future<void> deleteCredential(String site) async {
-    final response = await http.delete(Uri.parse('$baseUrl/credential/$site'));
+    final response = await http.delete(
+      Uri.parse('$baseUrl/credential/${Uri.encodeComponent(site)}'),
+    );
     if (response.statusCode == 200) {
       _credentials.removeWhere((c) => c.site == site);
       notifyListeners();

@@ -1,203 +1,76 @@
-# 🔐 Secure Password Manager - Production Edition
+# Secure Password Manager
 
-A **world-class, production-ready** password manager with a modern cross-platform Flutter UI and secure Python backend. Store and manage all your passwords securely with just one master password. Built with enterprise-grade security and a professional user experience.
+Cross-platform Flutter client with a FastAPI + Python backend. One master password protects a local encrypted vault (PBKDF2 + Fernet + HMAC).
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue)
-![Python](https://img.shields.io/badge/python-3.8%2B-green)
-![Flutter](https://img.shields.io/badge/flutter-3.0%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-orange)
+## Requirements
 
-## 🎯 Features
+- **Python** 3.8+
+- **Flutter** 3.x (for the desktop/mobile UI)
+- Dependencies: see `requirements.txt` (Python) and `flutter/pubspec.yaml` (Dart)
 
-### 🔒 Security Features
-- ✅ **AES-256 Encryption**: Military-grade encryption for all data
-- ✅ **PBKDF2 Key Derivation**: 600,000 iterations (industry standard)
-- ✅ **HMAC Integrity**: Tamper detection for vault files
-- ✅ **Encrypted Usernames**: Both usernames and passwords encrypted
-- ✅ **Atomic Operations**: Prevents data corruption
-- ✅ **Brute Force Protection**: Rate limiting with exponential backoff
-- ✅ **Secure Memory**: Best-effort sensitive data clearing
+## Install dependencies
 
-### 💻 Application Features
-- 📱 **Cross-Platform UI**: Modern Flutter interface for desktop and mobile
-- 🔍 **Search & Filter**: Quickly find your credentials
-- 🎲 **Password Generator**: Create strong, secure passwords instantly
-- 📊 **Password Strength Checker**: Verify password quality
-- 📋 **One-Click Copy**: Copy usernames and passwords to clipboard
-- 🔐 **Auto-Lock**: Lock vault for security
-- ✏️ **Edit & Delete**: Full CRUD operations for credentials
-- 🌐 **REST API**: FastAPI backend for secure communication
-
-## 🚀 Quick Start
-
-### Installation
+From the repository root (installs the backend package and all Python dependencies):
 
 ```bash
-# Clone or download the repository
-cd password_manager
+pip install -e .
+```
 
-# Install Python dependencies
+To install only the pinned set from the lock file without the editable package:
+
+```bash
 pip install -r requirements.txt
+```
 
-# Install Flutter (if not already installed)
-# Follow: https://flutter.dev/docs/get-started/install
+**Flutter (Dart) packages:**
 
-# Navigate to Flutter app
+```bash
 cd flutter
-
-# Install Flutter dependencies
 flutter pub get
-
-# Run the application
-python run.bat  # Windows
-# or
-./run.sh        # Linux/macOS
 ```
 
-**Or use the launcher scripts:**
-- Windows: Double-click `run.bat` (starts both backend and frontend)
-- Linux/macOS: `./run.sh` (starts both backend and frontend)
 
-### First Run
+## Run
 
-1. Launch the application
-2. Enter a **strong master password** (minimum 8 characters)
-   - This is your only password to remember!
-   - Make it strong and unique
-3. Start adding your credentials
+**Windows:** double-click or run `run.bat` from the repo root. It starts the API, then opens the app in **Microsoft Edge** (so you do not need Visual Studio for the Windows desktop toolchain). Ensure `flutter` is on your `PATH`, or keep the SDK under `Downloads\flutter_windows_*` so the script can find it.
 
-## 📸 Screenshots
+For a **native Windows .exe** instead of the browser, install [Visual Studio](https://visualstudio.microsoft.com/downloads/) with the **Desktop development with C++** workload, then run: `cd flutter` and `flutter run -d windows`.
 
-### Login Screen
-Enter your master password to unlock your secure vault.
+**Linux/macOS:** `chmod +x run.sh && ./run.sh` (adjust the Flutter device in `run.sh` if needed).
 
-### Main Interface
-- **Left Panel**: List of all your stored credentials with search
-- **Right Panel**: View and manage selected credential details
-- **Menu Bar**: Export, import, and password generation tools
+**API only** (for debugging) — if you used `pip install -e .`, you can run from any directory with no `PYTHONPATH`:
 
-## 🔒 Security Architecture
-
-The application uses a **client-server architecture** with secure REST API communication:
-
-- **Backend (Python/FastAPI)**: Handles all cryptographic operations and vault storage
-- **Frontend (Flutter)**: Provides modern UI and communicates with backend via HTTP
-
-```
-[Master Password] + [32-byte Salt] 
-        │
-        ▼
-  ┌──────────────────────────────┐
-  │  PBKDF2HMAC (SHA256, 600k)   │
-  └──────────────────────────────┘
-        │
-        ▼
-  [256-bit Master Key]
-        │
-        ├──► [Fernet Key] ──► Encrypt/Decrypt (AES-256)
-        │
-        └──► [HMAC Key] ──► Integrity Verification (HMAC-SHA256)
+```bash
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-## 📋 Usage Guide
+If the package is not installed, set `PYTHONPATH` to the `backend` folder (see `run.bat` / `run.sh`).
 
-### Adding Credentials
-1. Click **"➕ Add New"** button
-2. Enter site name, username, and password
-3. Use **"🎲 Generate"** to create a strong password
-4. Click **"Save"**
+The Flutter app expects the API at `http://127.0.0.1:8000`.
 
-### Viewing Credentials
-1. Select a credential from the list
-2. View details in the right panel
-3. Check **"Show"** to reveal password
-4. Click **"📋 Copy"** buttons to copy to clipboard
-
-### Generating Passwords
-1. Go to **Tools → Generate Password...**
-2. Customize length and character types
-3. Click **"🎲 Generate"**
-4. Copy the generated password
-
-### Exporting/Importing
-- **File → Export Vault...**: Backup your vault to JSON
-- **File → Import Vault...**: Restore from backup
-
-## 🏗️ Project Structure
+## Project layout
 
 ```
 password_manager/
-├── src/
-│   ├── api/
-│   │   └── main.py        # FastAPI backend server
-│   ├── core/
-│   │   ├── crypto.py      # Cryptographic functions
-│   │   ├── vault.py       # Vault management
-│   │   └── config.py      # Configuration
+├── backend/app/          # FastAPI app package (import as `app`)
+│   ├── main.py
+│   ├── paths.py
+│   ├── core/             # vault, crypto, config
 │   └── utils/
-│       ├── password_generator.py  # Password generation
-│       └── logger.py      # Logging
-├── flutter/               # Flutter frontend application
-│   ├── lib/
-│   │   ├── main.dart      # Flutter app entry point
-│   │   ├── models/        # Data models
-│   │   ├── providers/     # State management
-│   │   ├── screens/       # UI screens
-│   │   └── utils/         # Utilities
-│   ├── pubspec.yaml       # Flutter dependencies
-│   └── ...
-├── vault/                 # Encrypted vault storage
-├── logs/                  # Application logs
-├── config/                # Configuration files
-├── requirements.txt        # Python dependencies
-├── setup.py               # Package setup
-└── readme.md             # This file
+├── flutter/              # Flutter application
+├── vault/                # Local encrypted data (created at runtime, gitignored)
+├── config/               # Local settings (gitignored)
+├── requirements.txt
+├── pyproject.toml
+└── README.md
 ```
 
-## 📚 Documentation
+## Flutter not found in the terminal?
 
-- **[SECURITY.md](SECURITY.md)**: Detailed security documentation
-- **[INSTALL.md](INSTALL.md)**: Installation and troubleshooting guide
+- **PowerShell:** do not run `where flutter` — `where` is `Where-Object`, not a file search. Use **`where.exe flutter`** or **`Get-Command flutter`**. Or run **`. ./tools/init_flutter_path.ps1`** once per session to refresh `PATH` from the registry and prepend the SDK under `Downloads`.
+- **cmd.exe:** `where flutter` is correct. **`run.bat`** calls **`tools/flutter_path.bat`** so Flutter is found even if the IDE terminal has a stale `PATH`.
+- Restart the terminal (or Cursor) after changing Windows **User** `Path`.
 
-## ⚠️ Important Security Notes
+## License
 
-- **Master Password**: Never share your master password with anyone
-- **Backup**: Regularly export your vault as backup
-- **Updates**: Keep the application updated
-- **System Security**: Ensure your system is secure and malware-free
-- **Local Only**: This is a local application - no cloud sync or network features
-
-## 🛠️ Development
-
-### Requirements
-- Python 3.8+
-- cryptography >= 41.0.0
-
-### Building from Source
-
-```bash
-# Install in development mode
-pip install -e .
-
-# Run tests (if available)
-python -m pytest
-```
-
-## 📝 License
-
-MIT License - See LICENSE file for details
-
-## 🙏 Acknowledgments
-
-Built with security best practices inspired by:
-- Bitwarden
-- KeePass
-- 1Password
-
-## 🔄 Version History
-
-- **v1.0.0** (Current): Production release with GUI, password generator, and full security features
-
----
-
-**Made with ❤️ for secure password management**
+See `LICENSE`.

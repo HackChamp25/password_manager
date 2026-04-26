@@ -67,7 +67,6 @@ class _LoginScreenState extends State<LoginScreen> {
             _isLoading = false;
             _errorMessage = null;
           });
-          Navigator.pushReplacementNamed(context, '/home');
         }
       } else {
         if (mounted) {

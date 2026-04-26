@@ -10,7 +10,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# Avoid ignoring flutter/lib/ — do not use bare "lib/" here
+build/lib/
 lib64/
 parts/
 sdist/

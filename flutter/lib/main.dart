@@ -30,7 +30,6 @@ class MyApp extends StatelessWidget {
             surface: const Color(0xFF1a202c),
             background: const Color(0xFF0f172a),
           ),
-          fontFamily: 'Segoe',
           scaffoldBackgroundColor: const Color(0xFF0f172a),
           appBarTheme: const AppBarTheme(
             backgroundColor: Color(0xFF1a202c),
