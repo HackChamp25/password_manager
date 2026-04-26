@@ -1,0 +1,56 @@
+name: secure_password_manager
+description: A world-class, production-ready password manager built with Flutter featuring end-to-end encryption, intuitive UI, and comprehensive password management tools.
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # UI
+  cupertino_icons: ^1.0.2
+  
+  # State Management
+  provider: ^6.0.0
+  
+  # Encryption & Crypto
+  encrypt: ^4.0.1
+  crypto: ^3.0.2
+  
+  # Storage
+  shared_preferences: ^2.1.0
+  
+  # HTTP client
+  http: ^1.1.0
+  
+  # File operations
+  file_picker: ^5.2.0
+  path_provider: ^2.0.14
+  
+  # Utilities
+  intl: ^0.18.0
+  animations: ^2.0.0
+  
+  # Additional UI components
+  flutter_expandable_fab: ^1.7.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  
+  flutter_lints: ^2.0.0
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - assets/
+  
+  fonts:
+    - family: Segoe
+      fonts:
+        - asset: assets/fonts/segoe_ui.ttf
