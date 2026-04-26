@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "password-manager-backend"
+version = "1.0.0"
+description = "Password Manager API and vault core"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+  "cryptography>=41.0.0",
+  "fastapi>=0.104.0",
+  "uvicorn[standard]>=0.24.0",
+  "python-multipart>=0.0.6",
+  "pydantic>=2.0.0",
+  "setuptools>=65.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["backend"]
