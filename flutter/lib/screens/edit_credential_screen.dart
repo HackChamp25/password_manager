@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../providers/vault_provider.dart';
 import '../models/credential.dart';
 import '../utils/crypto_utils.dart';
+import '../widgets/totp_setup_section.dart';
 
 class EditCredentialScreen extends StatefulWidget {
   final Credential credential;
@@ -20,9 +21,13 @@ class _EditCredentialScreenState extends State<EditCredentialScreen> {
   late TextEditingController _siteController;
   late TextEditingController _usernameController;
   late TextEditingController _passwordController;
+  late TextEditingController _urlController;
+  late TextEditingController _notesController;
+  late TextEditingController _categoryController;
   bool _showPassword = false;
   bool _isLoading = false;
   int _passwordStrength = 0;
+  late TotpDraft _totpDraft;
 
   @override
   void initState() {
@@ -30,6 +35,16 @@ class _EditCredentialScreenState extends State<EditCredentialScreen> {
     _siteController = TextEditingController(text: widget.credential.site);
     _usernameController = TextEditingController(text: widget.credential.username);
     _passwordController = TextEditingController(text: widget.credential.password);
+    _urlController = TextEditingController(text: widget.credential.url);
+    _notesController = TextEditingController(text: widget.credential.notes);
+    _categoryController = TextEditingController(text: widget.credential.category);
+    _totpDraft = TotpDraft(
+      secret: widget.credential.totpSecret,
+      digits: widget.credential.totpDigits,
+      period: widget.credential.totpPeriod,
+      algorithm: widget.credential.totpAlgorithm,
+      issuer: widget.credential.totpIssuer,
+    );
     _updatePasswordStrength();
   }
 
@@ -38,6 +53,9 @@ class _EditCredentialScreenState extends State<EditCredentialScreen> {
     _siteController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _urlController.dispose();
+    _notesController.dispose();
+    _categoryController.dispose();
     super.dispose();
   }
 
@@ -71,15 +89,24 @@ class _EditCredentialScreenState extends State<EditCredentialScreen> {
       final vaultProvider = Provider.of<VaultProvider>(context, listen: false);
       final oldSite = widget.credential.site;
       final newCredential = Credential(
-        site: _siteController.text,
+        site: _siteController.text.trim(),
         username: _usernameController.text,
         password: _passwordController.text,
+        url: _urlController.text,
+        notes: _notesController.text,
+        favorite: widget.credential.favorite,
+        category: _categoryController.text,
+        totpSecret: _totpDraft.secret,
+        totpDigits: _totpDraft.digits,
+        totpPeriod: _totpDraft.period,
+        totpAlgorithm: _totpDraft.algorithm,
+        totpIssuer: _totpDraft.issuer,
       );
 
       await vaultProvider.updateCredential(oldSite, newCredential);
 
       if (mounted) {
-        Navigator.pop(context, true);
+        Navigator.pop(context, newCredential.site);
       }
     } catch (e) {
       if (mounted) {
@@ -144,6 +171,43 @@ class _EditCredentialScreenState extends State<EditCredentialScreen> {
               controller: _usernameController,
               decoration: const InputDecoration(
                 hintText: 'Enter your username or email',
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Website (optional)',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _urlController,
+              decoration: const InputDecoration(
+                hintText: 'e.g. github.com or full URL',
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Category',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _categoryController,
+              decoration: const InputDecoration(
+                hintText: 'Work, Personal, Finance…',
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Notes (optional)',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _notesController,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                hintText: 'Recovery codes, security questions…',
               ),
             ),
             const SizedBox(height: 20),
@@ -219,7 +283,14 @@ class _EditCredentialScreenState extends State<EditCredentialScreen> {
                 ],
               ),
 
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
+            const Divider(),
+            const SizedBox(height: 16),
+            TotpSetupSection(
+              draft: _totpDraft,
+              onChanged: (d) => setState(() => _totpDraft = d),
+            ),
+            const SizedBox(height: 24),
 
             // Buttons
             Row(

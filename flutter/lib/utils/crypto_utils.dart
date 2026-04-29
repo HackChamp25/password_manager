@@ -1,4 +1,6 @@
-/// Client-side helpers (strength meter, generator). Vault crypto runs on the API.
+import 'dart:math';
+
+/// Local helpers: strength meter and password generator.
 class CryptoUtils {
   static String generate({
     int length = 16,
@@ -10,24 +12,33 @@ class CryptoUtils {
     const String uppercaseChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     const String lowercaseChars = 'abcdefghijklmnopqrstuvwxyz';
     const String digitChars = '0123456789';
-    const String symbolChars = '!@#\$%^&*()_+-=[]{}|;:,.<>?';
+    const String symbolChars = r'!@#$%^&*()_+-=[]{}|;:,.<>?';
 
-    String chars = '';
-    if (uppercase) chars += uppercaseChars;
-    if (lowercase) chars += lowercaseChars;
-    if (digits) chars += digitChars;
-    if (symbols) chars += symbolChars;
+    var pools = <String>[];
+    if (uppercase) pools.add(uppercaseChars);
+    if (lowercase) pools.add(lowercaseChars);
+    if (digits) pools.add(digitChars);
+    if (symbols) pools.add(symbolChars);
 
-    if (chars.isEmpty) chars = lowercaseChars;
-
-    final random = DateTime.now().microsecond;
-    String password = '';
-    for (int i = 0; i < length; i++) {
-      final index = (random + i) % chars.length;
-      password += chars[index];
+    if (pools.isEmpty) {
+      pools = [lowercaseChars];
     }
 
-    return password;
+    final all = pools.join();
+    final rnd = Random.secure();
+    final out = <String>[];
+    for (var i = 0; i < pools.length && out.length < length; i++) {
+      final p = pools[i];
+      out.add(p[rnd.nextInt(p.length)]);
+    }
+    while (out.length < length) {
+      out.add(all[rnd.nextInt(all.length)]);
+    }
+    out.shuffle(rnd);
+    if (out.length > length) {
+      return out.sublist(0, length).join();
+    }
+    return out.join();
   }
 
   static int checkPasswordStrength(String password) {

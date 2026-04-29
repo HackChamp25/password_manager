@@ -1,23 +1,14 @@
 #!/bin/bash
-# Linux/macOS launcher: FastAPI + Flutter
+# Run Flutter desktop (no Python). Usage: ./run.sh   or   ./run.sh macos
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export PYTHONPATH="${SCRIPT_DIR}/backend"
-cd "${SCRIPT_DIR}"
-echo "Starting FastAPI backend..."
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 &
-BACKEND_PID=$!
-echo "Backend PID $BACKEND_PID"
-sleep 3
-echo "Starting Flutter..."
-cd flutter
-PLATFORM=${1:-}
-if [ -z "$PLATFORM" ]; then
+cd "${SCRIPT_DIR}/flutter"
+TARGET="${1:-}"
+if [ -z "$TARGET" ]; then
   if [ "$(uname -s)" = "Darwin" ]; then
-    PLATFORM="macos"
+    TARGET="macos"
   else
-    PLATFORM="linux"
+    TARGET="linux"
   fi
 fi
-flutter run -d "$PLATFORM"
-kill $BACKEND_PID 2>/dev/null || true
+flutter run -d "$TARGET"

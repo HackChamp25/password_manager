@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../providers/vault_provider.dart';
 import '../models/credential.dart';
 import '../utils/crypto_utils.dart';
+import '../widgets/totp_setup_section.dart';
 
 class AddCredentialScreen extends StatefulWidget {
   const AddCredentialScreen({Key? key}) : super(key: key);
@@ -15,9 +16,13 @@ class _AddCredentialScreenState extends State<AddCredentialScreen> {
   late TextEditingController _siteController;
   late TextEditingController _usernameController;
   late TextEditingController _passwordController;
+  late TextEditingController _urlController;
+  late TextEditingController _notesController;
+  late TextEditingController _categoryController;
   bool _showPassword = false;
   bool _isLoading = false;
   int _passwordStrength = 0;
+  late TotpDraft _totpDraft;
 
   @override
   void initState() {
@@ -25,6 +30,10 @@ class _AddCredentialScreenState extends State<AddCredentialScreen> {
     _siteController = TextEditingController();
     _usernameController = TextEditingController();
     _passwordController = TextEditingController();
+    _urlController = TextEditingController();
+    _notesController = TextEditingController();
+    _categoryController = TextEditingController(text: 'General');
+    _totpDraft = TotpDraft();
   }
 
   @override
@@ -32,6 +41,9 @@ class _AddCredentialScreenState extends State<AddCredentialScreen> {
     _siteController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _urlController.dispose();
+    _notesController.dispose();
+    _categoryController.dispose();
     super.dispose();
   }
 
@@ -63,16 +75,26 @@ class _AddCredentialScreenState extends State<AddCredentialScreen> {
 
     try {
       final vaultProvider = Provider.of<VaultProvider>(context, listen: false);
+      final site = _siteController.text.trim();
       await vaultProvider.addCredential(
         Credential(
-          site: _siteController.text,
+          site: site,
           username: _usernameController.text,
           password: _passwordController.text,
+          url: _urlController.text,
+          notes: _notesController.text,
+          favorite: false,
+          category: _categoryController.text,
+          totpSecret: _totpDraft.secret,
+          totpDigits: _totpDraft.digits,
+          totpPeriod: _totpDraft.period,
+          totpAlgorithm: _totpDraft.algorithm,
+          totpIssuer: _totpDraft.issuer,
         ),
       );
 
       if (mounted) {
-        Navigator.pop(context, true);
+        Navigator.pop(context, site);
       }
     } catch (e) {
       if (mounted) {
@@ -137,6 +159,43 @@ class _AddCredentialScreenState extends State<AddCredentialScreen> {
               controller: _usernameController,
               decoration: const InputDecoration(
                 hintText: 'Enter your username or email',
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Website (optional)',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _urlController,
+              decoration: const InputDecoration(
+                hintText: 'e.g. github.com or full URL',
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Category',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _categoryController,
+              decoration: const InputDecoration(
+                hintText: 'Work, Personal, Finance…',
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'Notes (optional)',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _notesController,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                hintText: 'Recovery codes, security questions…',
               ),
             ),
             const SizedBox(height: 20),
@@ -212,7 +271,14 @@ class _AddCredentialScreenState extends State<AddCredentialScreen> {
                 ],
               ),
 
-            const SizedBox(height: 20),
+            const SizedBox(height: 24),
+            const Divider(),
+            const SizedBox(height: 16),
+            TotpSetupSection(
+              draft: _totpDraft,
+              onChanged: (d) => setState(() => _totpDraft = d),
+            ),
+            const SizedBox(height: 24),
 
             // Buttons
             Row(
