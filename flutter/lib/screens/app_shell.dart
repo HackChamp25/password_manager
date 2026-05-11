@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/app_settings_provider.dart';
 import '../providers/vault_provider.dart';
 import '../widgets/brand_logo.dart';
+import '../widgets/command_palette.dart';
 import 'password_generator_page.dart';
 import 'security_center_page.dart';
 import 'settings_page.dart';
@@ -28,6 +30,7 @@ class _AppShellState extends State<AppShell> {
   int _index = 0;
   AppSettingsProvider? _settings;
   VaultProvider? _vault;
+  bool _paletteOpen = false;
 
   @override
   void didChangeDependencies() {
@@ -50,15 +53,57 @@ class _AppShellState extends State<AppShell> {
     _settings?.bumpActivity();
   }
 
+  Future<void> _openPalette() async {
+    if (_paletteOpen) return;
+    _paletteOpen = true;
+    try {
+      await CommandPalette.open(context, onNavigate: _go);
+    } finally {
+      _paletteOpen = false;
+    }
+  }
+
+  /// Builds the persistent IndexedStack body. Each page is wrapped in:
+  ///   - TickerMode(enabled: i == _index) — pauses AnimationControllers
+  ///     on off-screen pages so we never spend GPU/CPU on hidden frames
+  ///     (e.g. the Security Center health ring's idle pulse).
+  ///   - RepaintBoundary — isolates each page's paint layer so a
+  ///     repaint inside Settings (e.g. typing in the master-password
+  ///     field) never invalidates the Vault page that's hidden behind
+  ///     it.
+  Widget _buildPageBody() {
+    final pages = <Widget>[
+      const VaultPage(),
+      const VaultPage(favoritesOnly: true),
+      const SecurityCenterPage(),
+      const PasswordGeneratorPage(),
+      const SettingsPage(),
+    ];
+    return IndexedStack(
+      sizing: StackFit.expand,
+      index: _index,
+      children: [
+        for (var i = 0; i < pages.length; i++)
+          TickerMode(
+            enabled: i == _index,
+            child: RepaintBoundary(child: pages[i]),
+          ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    const pages = <Widget>[
-      VaultPage(),
-      VaultPage(favoritesOnly: true),
-      SecurityCenterPage(),
-      PasswordGeneratorPage(),
-      SettingsPage(),
-    ];
+    // IndexedStack keeps every page mounted, so their State (search
+    // queries, scroll positions, in-flight controllers) survives a tab
+    // switch. Switching becomes a paint-only operation: no
+    // initState/dispose churn, no animation restarts, no re-derived
+    // lists — which is what made the previous swap stutter for ~200ms.
+    //
+    // We pair it with `TickerMode` per-child so the off-screen pages
+    // PAUSE their AnimationControllers instead of burning CPU while
+    // invisible.
+    final pageBody = _buildPageBody();
 
     final wide = MediaQuery.sizeOf(context).width >= 880;
 
@@ -73,54 +118,86 @@ class _AppShellState extends State<AppShell> {
           }
           return false;
         },
-        child: Scaffold(
-          body: wide
-              ? Row(
-                  children: [
-                    _SidePanel(selected: _index, onSelect: _go),
-                    Expanded(child: pages[_index]),
-                  ],
-                )
-              : Column(
-                  children: [
-                    Expanded(child: pages[_index]),
-                    NavigationBar(
-                      selectedIndex: _index,
-                      onDestinationSelected: _go,
-                      destinations: const [
-                        NavigationDestination(
-                          icon: Icon(Icons.shield_outlined),
-                          selectedIcon: Icon(Icons.shield),
-                          label: 'Vault',
-                        ),
-                        NavigationDestination(
-                          icon: Icon(Icons.star_outline),
-                          selectedIcon: Icon(Icons.star),
-                          label: 'Favorites',
-                        ),
-                        NavigationDestination(
-                          icon: Icon(Icons.health_and_safety_outlined),
-                          selectedIcon: Icon(Icons.health_and_safety),
-                          label: 'Security',
-                        ),
-                        NavigationDestination(
-                          icon: Icon(Icons.key_outlined),
-                          selectedIcon: Icon(Icons.key),
-                          label: 'Gen',
-                        ),
-                        NavigationDestination(
-                          icon: Icon(Icons.settings_outlined),
-                          selectedIcon: Icon(Icons.settings),
-                          label: 'Settings',
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+        // Global Ctrl/Cmd+K shortcut. We register at the shell level so
+        // the palette is reachable from every tab, including dialogs that
+        // sit on top (showGeneralDialog inherits the same FocusScope).
+        child: Shortcuts(
+          shortcuts: <ShortcutActivator, Intent>{
+            const SingleActivator(LogicalKeyboardKey.keyK, control: true):
+                const _OpenPaletteIntent(),
+            const SingleActivator(LogicalKeyboardKey.keyK, meta: true):
+                const _OpenPaletteIntent(),
+          },
+          child: Actions(
+            actions: <Type, Action<Intent>>{
+              _OpenPaletteIntent: CallbackAction<_OpenPaletteIntent>(
+                onInvoke: (_) {
+                  _openPalette();
+                  return null;
+                },
+              ),
+            },
+            child: Focus(
+              autofocus: true,
+              child: Scaffold(
+                body: wide
+                    ? Row(
+                        children: [
+                          _SidePanel(
+                            selected: _index,
+                            onSelect: _go,
+                            onOpenPalette: _openPalette,
+                          ),
+                          Expanded(child: pageBody),
+                        ],
+                      )
+                    : Column(
+                        children: [
+                          Expanded(child: pageBody),
+                          NavigationBar(
+                            selectedIndex: _index,
+                            onDestinationSelected: _go,
+                            destinations: const [
+                              NavigationDestination(
+                                icon: Icon(Icons.shield_outlined),
+                                selectedIcon: Icon(Icons.shield),
+                                label: 'Vault',
+                              ),
+                              NavigationDestination(
+                                icon: Icon(Icons.star_outline),
+                                selectedIcon: Icon(Icons.star),
+                                label: 'Favorites',
+                              ),
+                              NavigationDestination(
+                                icon: Icon(Icons.health_and_safety_outlined),
+                                selectedIcon: Icon(Icons.health_and_safety),
+                                label: 'Security',
+                              ),
+                              NavigationDestination(
+                                icon: Icon(Icons.key_outlined),
+                                selectedIcon: Icon(Icons.key),
+                                label: 'Gen',
+                              ),
+                              NavigationDestination(
+                                icon: Icon(Icons.settings_outlined),
+                                selectedIcon: Icon(Icons.settings),
+                                label: 'Settings',
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+              ),
+            ),
+          ),
         ),
       ),
     );
   }
+}
+
+class _OpenPaletteIntent extends Intent {
+  const _OpenPaletteIntent();
 }
 
 // ---------------------------------------------------------------------
@@ -135,10 +212,15 @@ class _NavItemData {
 }
 
 class _SidePanel extends StatelessWidget {
-  const _SidePanel({required this.selected, required this.onSelect});
+  const _SidePanel({
+    required this.selected,
+    required this.onSelect,
+    required this.onOpenPalette,
+  });
 
   final int selected;
   final ValueChanged<int> onSelect;
+  final VoidCallback onOpenPalette;
 
   // Single source of truth for the rail. Order MUST match the pages
   // list in `_AppShellState.build`.
@@ -179,6 +261,8 @@ class _SidePanel extends StatelessWidget {
         children: [
           const _BrandMark(),
           const SizedBox(height: 18),
+          _CmdKHint(onTap: onOpenPalette),
+          const SizedBox(height: 14),
           SizedBox(
             height: stackHeight,
             child: Stack(
@@ -333,6 +417,68 @@ class _BrandMark extends StatelessWidget {
       // Flat geometric mark — same shape as the taskbar / about icon.
       // No plate, no photo, just the woven nest + keyhole in accent.
       child: BrandLogo(size: 38, glow: true),
+    );
+  }
+}
+
+/// Tiny "Ctrl+K" pill that doubles as a discoverability hint AND a click
+/// target for users who don't yet realize the palette exists.
+///
+/// The side rail is 92 px wide with 10 px horizontal padding, so the
+/// pill has ~72 px to live in. Icon + label at the default text scale
+/// can edge over that on bigger system font scales (we hit a 2 px
+/// horizontal overflow at 100% scale on Windows). A `FittedBox` with
+/// `BoxFit.scaleDown` is the right hammer here — it keeps the pill at
+/// natural size when it fits, and gracefully shrinks the contents
+/// (preserving alignment) when it doesn't, instead of throwing the
+/// yellow/black overflow stripes.
+class _CmdKHint extends StatelessWidget {
+  const _CmdKHint({required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Tooltip(
+      message: 'Quick search · Ctrl+K',
+      waitDuration: const Duration(milliseconds: 250),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+          decoration: BoxDecoration(
+            color:
+                theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.8),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.55),
+            ),
+          ),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.search,
+                  size: 13,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 5),
+                Text(
+                  'Ctrl+K',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    fontFamily: 'monospace',
+                    fontWeight: FontWeight.w600,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

@@ -95,6 +95,27 @@ class VaultProvider extends ChangeNotifier {
   /// and returns the new phrase.
   Future<String> rotateRecoveryPhrase() => _vm.rotateRecoveryPhrase();
 
+  /// Vault must be unlocked. Verifies [currentPassword], rotates the
+  /// password salt, re-wraps the MDK with [newPassword], and atomically
+  /// persists the new salt + wrap. Recovery phrase wrap and biometric
+  /// wrap are unaffected since they target the same MDK independently.
+  Future<UnlockOutcome> changeMasterPassword({
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    final res = await _vm.changeMasterPassword(
+      currentPassword: currentPassword,
+      newPassword: newPassword,
+    );
+    return UnlockOutcome(
+      success: res.success,
+      message: res.message,
+      legacyMigrated: res.legacyMigrated,
+      failuresSinceLastUnlock: res.failuresSinceLastUnlock,
+      lastSuccessfulUnlockAt: res.lastSuccessfulUnlockAt,
+    );
+  }
+
   /// Vault must be unlocked. Generates a device key + wraps MDK with it.
   Future<void> enrollBiometric() => _vm.enrollBiometric();
   Future<void> disableBiometric() => _vm.disableBiometric();
@@ -201,16 +222,25 @@ class VaultProvider extends ChangeNotifier {
   List<Credential> searchCredentials(String query) {
     if (query.isEmpty) return _credentials;
     final q = query.toLowerCase();
-    return _credentials
-        .where(
-          (c) =>
-              c.site.toLowerCase().contains(q) ||
-              c.username.toLowerCase().contains(q) ||
-              c.url.toLowerCase().contains(q) ||
-              c.notes.toLowerCase().contains(q) ||
-              c.category.toLowerCase().contains(q),
-        )
-        .toList();
+    return _credentials.where((c) {
+      // Common fields across kinds.
+      if (c.site.toLowerCase().contains(q)) return true;
+      if (c.notes.toLowerCase().contains(q)) return true;
+      if (c.category.toLowerCase().contains(q)) return true;
+      if (c.url.toLowerCase().contains(q)) return true;
+      // Login-only.
+      if (c.kind == ItemKind.login &&
+          c.username.toLowerCase().contains(q)) {
+        return true;
+      }
+      // Card-only (NEVER search the encrypted card number — only the
+      // cardholder + brand are useful for filtering).
+      if (c.kind == ItemKind.card) {
+        if (c.cardholderName.toLowerCase().contains(q)) return true;
+        if (c.cardBrand.toLowerCase().contains(q)) return true;
+      }
+      return false;
+    }).toList();
   }
 
   Future<void> setFavoriteForSite(String site, bool value) async {

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -154,7 +155,7 @@ class _LoginScreenState extends State<LoginScreen> {
       setState(() {
         _errorMessage =
             'Vault is locked after too many failed attempts. '
-            'Use “Forgot master password?” to recover with your phrase.';
+            'Use “Can’t unlock?” for recovery options (phrase or backup).';
       });
       return;
     }
@@ -257,52 +258,131 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   // ---------------------------------------------------------------------
-  // Recovery flow: enter 24-word phrase + new password to regain access.
+  // Recovery hub — no destructive erase here; that lives in Settings only
+  // when the vault is already unlocked.
   // ---------------------------------------------------------------------
-  Future<void> _startResetFlow() async {
-    final choice = await showDialog<_RecoveryChoice>(
+  Future<void> _openRecoveryHub() async {
+    await showDialog<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF0b1220),
-        title: const Text(
-          'Forgot master password?',
-          style: TextStyle(color: Colors.white),
-        ),
-        content: const Text(
-          'You can either:\n\n'
-          '  • Recover with your 24-word recovery phrase — your data is '
-          'preserved and you set a new password.\n\n'
-          '  • Or, as a last resort if both are lost, permanently erase the '
-          'vault and start fresh.',
-          style: TextStyle(color: Colors.white70, height: 1.4),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, _RecoveryChoice.cancel),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, _RecoveryChoice.destroy),
-            style: TextButton.styleFrom(
-              foregroundColor: const Color(0xFFf87171),
+      builder: (ctx) {
+        Widget tile({
+          required IconData icon,
+          required String title,
+          required String subtitle,
+          required VoidCallback onTap,
+        }) {
+          return Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: () {
+                Navigator.pop(ctx);
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (!mounted) return;
+                  onTap();
+                });
+              },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(icon, color: const Color(0xFF67e8f9), size: 22),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 15,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            subtitle,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.65),
+                              height: 1.35,
+                              fontSize: 12.5,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Icon(
+                      Icons.chevron_right,
+                      color: Colors.white.withValues(alpha: 0.35),
+                    ),
+                  ],
+                ),
+              ),
             ),
-            child: const Text('Erase vault'),
+          );
+        }
+
+        return AlertDialog(
+          backgroundColor: const Color(0xFF0b1220),
+          title: const Text(
+            'Recover access',
+            style: TextStyle(color: Colors.white),
           ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, _RecoveryChoice.recover),
-            child: const Text('Recover with phrase'),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 440),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Forgot your master password? Pick how you want back in. '
+                    'All options keep or restore your data — nothing is erased from this screen.',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.72),
+                      height: 1.45,
+                      fontSize: 13,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Divider(color: Color(0xFF1e293b)),
+                  tile(
+                    icon: Icons.key_outlined,
+                    title: 'Recover with recovery phrase',
+                    subtitle:
+                        '24-word phrase + new master password. Your vault on this device stays intact.',
+                    onTap: _runRecoveryWithPhraseFlow,
+                  ),
+                  const Divider(color: Color(0xFF1e293b)),
+                  tile(
+                    icon: Icons.restore_outlined,
+                    title: 'Restore from encrypted backup',
+                    subtitle:
+                        'Use a .cnest file you exported earlier, plus your phrase and a new password.',
+                    onTap: _runRestoreFromBackupFlow,
+                  ),
+                  const Divider(color: Color(0xFF1e293b)),
+                  tile(
+                    icon: Icons.fact_check_outlined,
+                    title: 'Test recovery phrase',
+                    subtitle:
+                        'Check that your phrase still matches this vault — no password change.',
+                    onTap: _runVerifyPhraseOnlyFlow,
+                  ),
+                ],
+              ),
+            ),
           ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Close'),
+            ),
+          ],
+        );
+      },
     );
-
-    if (!mounted || choice == null || choice == _RecoveryChoice.cancel) return;
-
-    if (choice == _RecoveryChoice.recover) {
-      await _runRecoveryWithPhraseFlow();
-    } else {
-      await _runDestructiveResetFlow();
-    }
   }
 
   Future<void> _runRecoveryWithPhraseFlow() async {
@@ -461,60 +541,164 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<void> _runDestructiveResetFlow() async {
-    final confirmController = TextEditingController();
+  Future<void> _runRestoreFromBackupFlow() async {
+    final pathController = TextEditingController();
+    final phraseController = TextEditingController();
+    final pwdController = TextEditingController();
+    final pwd2Controller = TextEditingController();
+    String? errorText;
+
     final ok = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) {
-        var typed = '';
         return StatefulBuilder(
           builder: (innerContext, setInnerState) {
+            Future<void> submit() async {
+              final path = pathController.text.trim();
+              if (path.isEmpty) {
+                setInnerState(() => errorText = 'Path to the .cnest backup file is required.');
+                return;
+              }
+              final f = File(path);
+              if (!f.existsSync()) {
+                setInnerState(() => errorText = 'No file found at that path.');
+                return;
+              }
+              final phraseErr = validateRecoveryPhrase(phraseController.text);
+              if (phraseErr != null) {
+                setInnerState(() => errorText = phraseErr);
+                return;
+              }
+              if (pwdController.text.length < 8) {
+                setInnerState(() =>
+                    errorText = 'New master password must be at least 8 characters.');
+                return;
+              }
+              if (pwdController.text != pwd2Controller.text) {
+                setInnerState(
+                    () => errorText = 'New password and confirmation do not match.');
+                return;
+              }
+              setInnerState(() => errorText = null);
+              setState(() => _isResetting = true);
+              try {
+                final bytes = await f.readAsBytes();
+                final result = await context.read<VaultProvider>().importEncryptedBackup(
+                      backupBytes: bytes,
+                      recoveryPhrase: phraseController.text,
+                      newPassword: pwdController.text,
+                    );
+                if (!innerContext.mounted) return;
+                if (result.success) {
+                  Navigator.pop(dialogContext, true);
+                } else {
+                  setInnerState(() => errorText = result.message);
+                  setState(() => _isResetting = false);
+                }
+              } catch (e) {
+                if (innerContext.mounted) {
+                  setInnerState(() => errorText = 'Restore failed: $e');
+                  setState(() => _isResetting = false);
+                }
+              }
+            }
+
             return AlertDialog(
-              backgroundColor: const Color(0xFF1a0c0c),
+              backgroundColor: const Color(0xFF0b1220),
               title: const Text(
-                'Permanently erase vault?',
-                style: TextStyle(color: Color(0xFFfca5a5)),
+                'Restore from encrypted backup',
+                style: TextStyle(color: Colors.white),
               ),
-              content: SizedBox(
-                width: 460,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'This will DELETE every encrypted entry and the recovery phrase. '
-                      'There is no undo. Only continue if you have lost both the master '
-                      'password AND the recovery phrase.',
-                      style: TextStyle(color: Colors.white70, height: 1.4),
-                    ),
-                    const SizedBox(height: 14),
-                    TextField(
-                      controller: confirmController,
-                      onChanged: (v) => setInnerState(() => typed = v),
-                      style: const TextStyle(color: Colors.white),
-                      decoration: const InputDecoration(
-                        labelText: 'Type ERASE to confirm',
-                        labelStyle: TextStyle(color: Colors.white70),
-                        border: OutlineInputBorder(),
+              content: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'This replaces the vault on this device with the backup. '
+                        'You need the same recovery phrase that was valid when the backup was made.',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.72),
+                          height: 1.4,
+                          fontSize: 13,
+                        ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(height: 14),
+                      TextField(
+                        controller: pathController,
+                        style: const TextStyle(color: Colors.white, fontFamily: 'monospace', fontSize: 12),
+                        decoration: InputDecoration(
+                          labelText: 'Path to .cnest file',
+                          labelStyle: const TextStyle(color: Colors.white70),
+                          hintText: r'C:\Users\you\Documents\CipherNest\...',
+                          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.3)),
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: phraseController,
+                        minLines: 3,
+                        maxLines: 4,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
+                        decoration: const InputDecoration(
+                          labelText: '24-word recovery phrase',
+                          labelStyle: TextStyle(color: Colors.white70),
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: pwdController,
+                        obscureText: true,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'New master password',
+                          labelStyle: TextStyle(color: Colors.white70),
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: pwd2Controller,
+                        obscureText: true,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'Confirm new master password',
+                          labelStyle: TextStyle(color: Colors.white70),
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      if (errorText != null) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          errorText!,
+                          style: const TextStyle(color: Color(0xFFfca5a5), fontSize: 12),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
               ),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.pop(dialogContext, false),
+                  onPressed: _isResetting ? null : () => Navigator.pop(dialogContext, false),
                   child: const Text('Cancel'),
                 ),
                 FilledButton(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: const Color(0xFFef4444),
-                  ),
-                  onPressed: typed.trim().toUpperCase() == 'ERASE'
-                      ? () => Navigator.pop(dialogContext, true)
-                      : null,
-                  child: const Text('Erase forever'),
+                  onPressed: _isResetting ? null : submit,
+                  child: _isResetting
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Restore'),
                 ),
               ],
             );
@@ -523,23 +707,148 @@ class _LoginScreenState extends State<LoginScreen> {
       },
     );
 
-    confirmController.dispose();
+    pathController.dispose();
+    phraseController.dispose();
+    pwdController.dispose();
+    pwd2Controller.dispose();
 
-    if (ok != true || !mounted) return;
-    setState(() => _isResetting = true);
-    try {
-      await context.read<VaultProvider>().resetVault();
+    if (!mounted) return;
+    setState(() => _isResetting = false);
+
+    if (ok == true) {
+      _passwordController.clear();
+      await _vaultLockKey.currentState?.playUnlock();
       if (!mounted) return;
-      _isNewVault = true;
-      setState(() {
-        _passwordController.clear();
-        _errorMessage = 'Vault erased. Create a new master password.';
-      });
-    } finally {
-      if (mounted) {
-        setState(() => _isResetting = false);
-      }
+      setState(() => _errorMessage = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Vault restored from backup. New master password is active.'),
+        ),
+      );
     }
+  }
+
+  Future<void> _runVerifyPhraseOnlyFlow() async {
+    final phraseController = TextEditingController();
+    bool? result;
+    bool testing = false;
+    String? errorText;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (innerContext, setInnerState) {
+            Future<void> test() async {
+              final phraseErr = validateRecoveryPhrase(phraseController.text);
+              if (phraseErr != null) {
+                setInnerState(() {
+                  errorText = phraseErr;
+                  result = null;
+                });
+                return;
+              }
+              setInnerState(() {
+                testing = true;
+                errorText = null;
+                result = null;
+              });
+              final ok = await context.read<VaultProvider>().testRecoveryPhrase(
+                    phraseController.text,
+                  );
+              if (!innerContext.mounted) return;
+              setInnerState(() {
+                testing = false;
+                result = ok;
+                if (!ok) {
+                  errorText =
+                      'That phrase does not unlock this vault. Check spelling and word order.';
+                }
+              });
+            }
+
+            return AlertDialog(
+              backgroundColor: const Color(0xFF0b1220),
+              title: const Text(
+                'Test recovery phrase',
+                style: TextStyle(color: Colors.white),
+              ),
+              content: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Nothing on disk is changed. This only checks whether your phrase '
+                        'still matches the vault on this computer.',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.72),
+                          height: 1.4,
+                          fontSize: 13,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      TextField(
+                        controller: phraseController,
+                        minLines: 3,
+                        maxLines: 4,
+                        autocorrect: false,
+                        enableSuggestions: false,
+                        style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
+                        decoration: const InputDecoration(
+                          labelText: '24-word recovery phrase',
+                          labelStyle: TextStyle(color: Colors.white70),
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      if (testing) ...[
+                        const SizedBox(height: 14),
+                        const LinearProgressIndicator(),
+                      ] else if (result == true) ...[
+                        const SizedBox(height: 14),
+                        const Row(
+                          children: [
+                            Icon(Icons.check_circle, color: Colors.greenAccent),
+                            SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'Valid — this phrase matches this vault.',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                      if (errorText != null && !testing) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          errorText!,
+                          style: const TextStyle(color: Color(0xFFfca5a5), fontSize: 12),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: testing ? null : () => Navigator.pop(dialogContext),
+                  child: Text(result == true ? 'Done' : 'Close'),
+                ),
+                FilledButton(
+                  onPressed: testing ? null : test,
+                  child: const Text('Test phrase'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    phraseController.dispose();
   }
 
   // ---------------------------------------------------------------------
@@ -767,9 +1076,21 @@ class _LoginScreenState extends State<LoginScreen> {
                                   ),
                                 ),
                                 const SizedBox(width: 32),
+                                // Dedicated RepaintBoundary around the
+                                // auth card so password-input repaints
+                                // (cursor blink, character append/delete,
+                                // password-strength color tween) do NOT
+                                // invalidate the hero panel's layer.
+                                // Without this, the engine merges the
+                                // dirty rect with the parent's
+                                // RepaintBoundary and the whole hero
+                                // wordmark layer is repainted per
+                                // keystroke.
                                 SizedBox(
                                   width: 350,
-                                  child: _buildAuthCard(context),
+                                  child: RepaintBoundary(
+                                    child: _buildAuthCard(context),
+                                  ),
                                 ),
                               ],
                             )
@@ -778,7 +1099,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                 children: [
                                   _buildHeroPanel(compact: true),
                                   const SizedBox(height: 20),
-                                  _buildAuthCard(context),
+                                  RepaintBoundary(child: _buildAuthCard(context)),
                                 ],
                               ),
                             ),
@@ -819,23 +1140,33 @@ class _LoginScreenState extends State<LoginScreen> {
             _LockoutBanner(failureCount: _intrusionFailureCount),
             const SizedBox(height: 14),
           ],
-          ListenableBuilder(
-            listenable: _passwordController,
-            builder: (context, _) {
-              final fill =
-                  (_passwordController.text.length / 16).clamp(0.0, 1.0);
-              return VaultLockAnimation(
-                key: _vaultLockKey,
-                size: 220,
-                fillProgress: fill,
-              );
-            },
+          // RepaintBoundary the lock + password pill independently from
+          // the rest of the auth card. The lock paints at 60 fps under
+          // the idle controller and the password pill repaints on every
+          // keystroke; without these boundaries the engine merges those
+          // dirty regions with the parent column and forces a wider
+          // repaint each frame, which is what made typing feel sticky.
+          RepaintBoundary(
+            child: ListenableBuilder(
+              listenable: _passwordController,
+              builder: (context, _) {
+                final fill =
+                    (_passwordController.text.length / 16).clamp(0.0, 1.0);
+                return VaultLockAnimation(
+                  key: _vaultLockKey,
+                  size: 220,
+                  fillProgress: fill,
+                );
+              },
+            ),
           ),
           const SizedBox(height: 18),
-          SizedBox(
-            key: const ValueKey('auth_password_pill'),
-            width: 280,
-            child: _buildPasswordPill(),
+          RepaintBoundary(
+            child: SizedBox(
+              key: const ValueKey('auth_password_pill'),
+              width: 280,
+              child: _buildPasswordPill(),
+            ),
           ),
           if (_isLoading) ...[
             const SizedBox(height: 12),
@@ -956,7 +1287,7 @@ class _LoginScreenState extends State<LoginScreen> {
           if (!_isNewVault)
             Center(
               child: TextButton(
-                onPressed: (_isLoading || _isResetting) ? null : _startResetFlow,
+                onPressed: (_isLoading || _isResetting) ? null : _openRecoveryHub,
                 style: TextButton.styleFrom(
                   foregroundColor: Colors.white.withValues(alpha: 0.55),
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -968,7 +1299,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Text(
-                        'Forgot master password? Reset vault',
+                        'Can’t unlock? Recovery options',
                         style: TextStyle(fontSize: 12, letterSpacing: 0.3),
                       ),
               ),
@@ -1080,24 +1411,50 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 }
 
-/// Non-interactive gradient; split out so the background can live in a
-/// [RepaintBoundary] and stay separate from the content layer.
+/// Atmospheric dim layer above the matrix. Two stacked gradients:
+///   • flat dark wash so the matrix becomes background, not noise
+///   • soft cyan radial glow under the hero so the wordmark has air
 class _LoginDimOverlay extends StatelessWidget {
   const _LoginDimOverlay();
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Colors.black.withValues(alpha: 0.72),
-            const Color(0xFF020617).withValues(alpha: 0.88),
-          ],
+    return Stack(
+      children: [
+        // Tier 1: subtle dark wash. Previous values (0.86 / 0.92)
+        // crushed the matrix down to faint hints. Dropping to 0.55 /
+        // 0.62 keeps the text panels readable while letting the rain
+        // actually be visible — which is the whole point of having it.
+        Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Colors.black.withValues(alpha: 0.55),
+                  const Color(0xFF020617).withValues(alpha: 0.62),
+                ],
+              ),
+            ),
+          ),
         ),
-      ),
+        // Tier 2: soft cyan halo under the wordmark for atmosphere.
+        Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: RadialGradient(
+                center: const Alignment(-0.55, -0.05),
+                radius: 0.85,
+                colors: [
+                  const Color(0xFF22d3ee).withValues(alpha: 0.10),
+                  const Color(0xFF22d3ee).withValues(alpha: 0.0),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1251,6 +1608,20 @@ class _RainColumn {
 // frame (the main jank source with the old implementation).
 final TextPainter _matrixCharPainter = TextPainter(textDirection: TextDirection.ltr);
 
+// Process-wide cache for the matrix's radial background shader. The
+// previous implementation called `RadialGradient.createShader(...)`
+// every paint (28 fps), allocating a fresh Shader object each time.
+// Now we keep one shader per Size and reuse it across every frame the
+// matrix runs for. The cache key is the rounded integer size so that
+// sub-pixel resize events don't keep blowing it away.
+_MatrixBgCache? _matrixBgCache;
+
+class _MatrixBgCache {
+  _MatrixBgCache(this.size, this.shader);
+  final Size size;
+  final Shader shader;
+}
+
 class _MatrixRainPainter extends CustomPainter {
   _MatrixRainPainter({
     required this.columns,
@@ -1264,16 +1635,32 @@ class _MatrixRainPainter extends CustomPainter {
 
   static const double _attractorRadius = 360;
 
+  Shader _bgShader(Size size) {
+    final cached = _matrixBgCache;
+    if (cached != null &&
+        cached.size.width.round() == size.width.round() &&
+        cached.size.height.round() == size.height.round()) {
+      return cached.shader;
+    }
+    final shader = const RadialGradient(
+      center: Alignment.center,
+      radius: 1.1,
+      colors: [Color(0xFF050a16), Color(0xFF000308)],
+    ).createShader(Offset.zero & size);
+    _matrixBgCache = _MatrixBgCache(size, shader);
+    return shader;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     final p = pointerN.value;
-    final bg = Paint()
-      ..shader = const RadialGradient(
-        center: Alignment.center,
-        radius: 1.1,
-        colors: [Color(0xFF050a16), Color(0xFF000308)],
-      ).createShader(Offset.zero & size);
-    canvas.drawRect(Offset.zero & size, bg);
+
+    // Cached background gradient: same shader instance reused frame to
+    // frame so we never pay the createShader() cost during animation.
+    canvas.drawRect(
+      Offset.zero & size,
+      Paint()..shader = _bgShader(size),
+    );
 
     final ax = size.width * (0.5 + p.dx * 0.4);
     final ay = size.height * (0.5 + p.dy * 0.4);
@@ -1297,34 +1684,32 @@ class _MatrixRainPainter extends CustomPainter {
 
         final Color color;
         if (isHead) {
-          color = const Color(0xFFe0fdff);
+          // Atmosphere, not spotlight — head is dim cyan, not white.
+          color = const Color(0xFFa7e8f5).withValues(alpha: 0.55);
         } else {
-          final fade = pow(1 - t, 1.4).toDouble();
-          final baseG = (170 + boost * 60).clamp(0.0, 240.0).toInt();
+          final fade = pow(1 - t, 1.6).toDouble();
+          final baseG = (140 + boost * 50).clamp(0.0, 220.0).toInt();
           color = Color.fromARGB(
-            (fade * 255).toInt().clamp(40, 255),
-            (60 + boost * 80).toInt().clamp(20, 230),
+            (fade * 130).toInt().clamp(15, 130),
+            (40 + boost * 60).toInt().clamp(15, 200),
             baseG,
-            (210 + boost * 45).toInt().clamp(160, 255),
+            (180 + boost * 40).toInt().clamp(130, 230),
           );
         }
 
-        // Single head glow — cheaper and cleaner than two stacked.
         _matrixCharPainter.text = TextSpan(
           text: glyph,
           style: TextStyle(
             color: color,
             fontSize: col.fontSize,
             fontFamily: 'monospace',
-            fontWeight: isHead ? FontWeight.w800 : FontWeight.w500,
-            shadows: isHead
-                ? [
-                    Shadow(
-                      color: const Color(0xFF50d9f0).withValues(alpha: 0.85),
-                      blurRadius: 10,
-                    ),
-                  ]
-                : null,
+            fontWeight: FontWeight.w400,
+            // Drop the per-glyph Shadow on heads. Shadow forces an
+            // off-screen blur pass *per character*, which at the
+            // matrix's column count is one of the biggest GPU
+            // expenses per frame and was contributing to keystroke
+            // latency. The head is bright cyan already; the eye
+            // reads it as glowing without the blur.
           ),
         );
         _matrixCharPainter.layout();
@@ -1332,10 +1717,13 @@ class _MatrixRainPainter extends CustomPainter {
       }
     }
 
-    final aura = Paint()
-      ..color = const Color(0xFF22d3ee).withValues(alpha: 0.05)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 40);
-    canvas.drawCircle(Offset(ax, ay), 130, aura);
+    // The cyan aura that used `MaskFilter.blur(40)` is removed.
+    // A 40-px GPU blur over the full hover region was the single
+    // most expensive op in this painter — Skia's blur scales
+    // quadratically with radius and ran 28 fps. The pointer parallax
+    // already shifts the matrix columns themselves toward the cursor,
+    // so the aura was decorative double-coverage. Removing it gives
+    // back roughly half the painter's per-frame budget.
   }
 
   @override
@@ -1346,31 +1734,20 @@ class _MatrixRainPainter extends CustomPainter {
   }
 }
 
-// Short strike → flicker → vanish, 0..1, used for "SECURE EVERY LOGIN"
-// thunder only (not a line graphic). Looped via [AnimationController] + rest.
-double _thunderTextIntensity(double p) {
-  if (p < 0.02) return 0;
-  if (p < 0.07) {
-    return ((p - 0.02) / 0.05).clamp(0.0, 1.0);
-  }
-  if (p < 0.16) {
-    const base = 0.55;
-    final wobble = (sin(p * 90) + 1) / 2;
-    return (base + wobble * 0.45).clamp(0.0, 1.0);
-  }
-  if (p < 0.35) {
-    return (1 - (p - 0.16) / 0.19).clamp(0.0, 1.0);
-  }
-  return 0;
-}
-
 // =============================================================================
-// BRAND HERO
+// BRAND HERO  —  editorial composition
 // =============================================================================
 //
-// Wordmark: "CIPHER" / "NEST" two lines, large display size, shared stagger.
-// Tagline: whole line thunders (opacity, scale, outer glow, fill) — no
-// ShaderMask on the glyphs; reads as a product, not an effect baked in.
+// Five elements in one quiet hierarchy:
+//   1. Kicker  : "─ PERSONAL VAULT · EST. 2026"
+//   2. Mark    : CIPHER  ◆  NEST  (single line, geometric brand glyph)
+//   3. Rule    : draws in once, then a slow alpha breath
+//   4. Tagline : editorial italic, "Encrypted by you. Trusted only by you."
+//   5. Status  : "● ENCRYPTED LOCALLY" with pulsing dot
+//
+// One [_intro] controller orchestrates the entrance (1.6s). One [_idle]
+// controller drives the whole hero's heartbeat (rotation, breath, dot pulse)
+// — no competing animations.
 class _BrandHero extends StatefulWidget {
   const _BrandHero({required this.compact});
 
@@ -1380,136 +1757,174 @@ class _BrandHero extends StatefulWidget {
   State<_BrandHero> createState() => _BrandHeroState();
 }
 
-class _BrandHeroState extends State<_BrandHero> with TickerProviderStateMixin {
+class _BrandHeroState extends State<_BrandHero>
+    with TickerProviderStateMixin {
   late final AnimationController _intro = AnimationController(
-    duration: const Duration(milliseconds: 1900),
+    duration: const Duration(milliseconds: 1700),
     vsync: this,
   )..forward();
 
-  late final AnimationController _shimmer = AnimationController(
-    duration: const Duration(seconds: 7),
+  late final AnimationController _idle = AnimationController(
+    duration: const Duration(seconds: 6),
     vsync: this,
   )..repeat();
 
-  /// Thunder: whole tagline (scale, opacity, outer glow, text color) — no
-  /// in-glyph shader tricks.
-  late final AnimationController _thunder = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 1350),
-  )..addStatusListener(_onThunderDone)
-    ..addListener(_onThunderValue);
-
-  Timer? _thunderRestTimer;
-  final Random _thunderRng = Random();
-
-  /// After the first real strike, copy stays on screen; later cycles
-  /// only re-flash glow/shader.
-  bool _taglineLive = false;
-
-  static const String _tag = 'SECURE EVERY LOGIN';
+  static const _accent = Color(0xFF22d3ee);
   static const _slate = Color(0xFF94A3B8);
-  static const _paper = Color(0xFFf1f5f9);
+  static const _ink = Color(0xFFE2E8F0);
+  static const _live = Color(0xFF22c55e);
 
-  @override
-  void initState() {
-    super.initState();
-    Future.delayed(const Duration(milliseconds: 820), () {
-      if (mounted) _thunder.forward();
-    });
-  }
-
-  void _onThunderDone(AnimationStatus s) {
-    if (s != AnimationStatus.completed) return;
-    _thunderRestTimer?.cancel();
-    _thunderRestTimer = Timer(
-      Duration(
-        milliseconds: 1100 + _thunderRng.nextInt(1500),
-      ),
-      () {
-        if (mounted) _thunder.forward(from: 0);
-      },
-    );
-  }
-
-  void _onThunderValue() {
-    final t = _thunder.value;
-    if (!_taglineLive && _thunderTextIntensity(t) > 0.2) {
-      setState(() => _taglineLive = true);
-    }
+  Animation<double> _intoCurve(double a, double b,
+      [Curve c = Curves.easeOutCubic]) {
+    return CurvedAnimation(parent: _intro, curve: Interval(a, b, curve: c));
   }
 
   @override
   void dispose() {
-    _thunder
-      ..removeStatusListener(_onThunderDone)
-      ..removeListener(_onThunderValue)
-      ..dispose();
-    _thunderRestTimer?.cancel();
     _intro.dispose();
-    _shimmer.dispose();
+    _idle.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    const word = _WordmarkScale();
-    final wordSize = word.fontSizeFor(compact: widget.compact);
-    final track = wordSize * word.trackingK;
-    final afterWordGap = wordSize * word.belowTagGapK;
-    final tagSize = wordSize * word.tagToWordK;
-    final tagTrack = tagSize * word.tagLineTrackK;
-    const accent = Color(0xFF22d3ee);
+    final compact = widget.compact;
+    final wordSize = compact ? 64.0 : 96.0;
+    final track = wordSize * 0.04;
+    final ruleWidth = compact ? 220.0 : 320.0;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        // 1. KICKER ────────────────────────────────────────────────
+        FadeTransition(
+          opacity: _intoCurve(0.0, 0.25),
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(-0.06, 0),
+              end: Offset.zero,
+            ).animate(_intoCurve(0.0, 0.25)),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: compact ? 18 : 26,
+                  height: 1,
+                  color: _accent.withValues(alpha: 0.55),
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  'PERSONAL VAULT  ·  EST. 2026',
+                  style: TextStyle(
+                    color: _slate,
+                    fontSize: compact ? 10 : 11,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 3.0,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        SizedBox(height: compact ? 18 : 28),
+
+        // 2. WORDMARK : CIPHER  ◆  NEST ────────────────────────────
+        // The ShaderMask runs an animated gradient so the wordmark has
+        // a slow cyan "color flow" sweeping across it. We drive it from
+        // the existing `_idle` 6s controller so this stays in rhythm
+        // with the rule, the diamond breath, and the status pill —
+        // one coherent heartbeat instead of a soup of independent
+        // animations. The intro fade-up is preserved through
+        // `FittedBox` keeping the per-letter stagger inside.
         FittedBox(
           fit: BoxFit.scaleDown,
           alignment: Alignment.centerLeft,
           child: AnimatedBuilder(
-            animation: _shimmer,
-            builder: (context, child) => ShaderMask(
-              blendMode: BlendMode.srcIn,
-              shaderCallback: (bounds) {
-                final t = _shimmer.value;
-                final pos = -0.25 + t * 1.5;
-                return LinearGradient(
-                  begin: Alignment.centerLeft,
-                  end: Alignment.centerRight,
-                  colors: const [
-                    Color(0xFFDBF0FF),
-                    Color(0xFFFFFFFF),
-                    Color(0xFF22d3ee),
-                  ],
-                  stops: [
-                    (pos - 0.16).clamp(0.0, 1.0),
-                    pos.clamp(0.0, 1.0),
-                    (pos + 0.16).clamp(0.0, 1.0),
-                  ],
-                ).createShader(bounds);
-              },
-              child: child,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            animation: _idle,
+            builder: (context, child) {
+              return ShaderMask(
+                blendMode: BlendMode.srcIn,
+                shaderCallback: (bounds) {
+                  return LinearGradient(
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                    colors: const [
+                      Color(0xFFB8E5FF),
+                      Color(0xFFE8F8FF),
+                      Color(0xFFFFFFFF), // soft white
+                      Color(0xFF67E8F9), // cyan highlight band
+                      Color(0xFFFFFFFF),
+                      Color(0xFFE8F8FF),
+                      Color(0xFFB8E5FF),
+                    ],
+                    stops: const [
+                      0.00,
+                      0.22,
+                      0.44,
+                      0.50, // bright cyan peak
+                      0.56,
+                      0.78,
+                      1.00,
+                    ],
+                    tileMode: TileMode.mirror,
+                    transform: _ShimmerSweep(_idle.value),
+                  ).createShader(bounds);
+                },
+                child: child,
+              );
+            },
+            child: Row(
               mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 _StaggeredWordmark(
                   text: 'CIPHER',
                   fontSize: wordSize,
                   letterSpacing: track,
                   height: 0.95,
-                  intervalLead: 0.0,
+                  intervalLead: 0.05,
                   controller: _intro,
                 ),
-                SizedBox(height: wordSize * 0.04),
+                SizedBox(width: wordSize * 0.42),
+                FadeTransition(
+                  opacity: _intoCurve(0.40, 0.65),
+                  child: ScaleTransition(
+                    scale: Tween<double>(begin: 0.4, end: 1.0).animate(
+                      CurvedAnimation(
+                        parent: _intro,
+                        curve: const Interval(
+                          0.40,
+                          0.70,
+                          curve: Curves.easeOutBack,
+                        ),
+                      ),
+                    ),
+                    child: AnimatedBuilder(
+                      animation: _idle,
+                      builder: (context, _) {
+                        final t = _idle.value * 2 * pi;
+                        return Transform.rotate(
+                          angle: _idle.value * 2 * pi * 0.18,
+                          child: CustomPaint(
+                            size: Size.square(wordSize * 0.52),
+                            painter: _DiamondMark(
+                              breath: (sin(t) + 1) / 2,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                SizedBox(width: wordSize * 0.42),
                 _StaggeredWordmark(
                   text: 'NEST',
                   fontSize: wordSize,
                   letterSpacing: track,
                   height: 0.95,
-                  intervalLead: 0.34,
+                  intervalLead: 0.55,
                   controller: _intro,
                 ),
               ],
@@ -1517,53 +1932,143 @@ class _BrandHeroState extends State<_BrandHero> with TickerProviderStateMixin {
           ),
         ),
 
-        SizedBox(height: afterWordGap),
+        SizedBox(height: compact ? 22 : 32),
 
-        FittedBox(
-          fit: BoxFit.scaleDown,
-          alignment: Alignment.centerLeft,
-          child: AnimatedBuilder(
-            animation: _thunder,
-            builder: (context, _) {
-              final s = _thunderTextIntensity(_thunder.value);
-              // First strike: whole line materializes. After: stable type,
-              // only the *block* scales and the outer glow pulses.
-              final opacity = _taglineLive
-                  ? (0.97 + 0.03 * s * s)
-                  : (2.4 * s).clamp(0.0, 1.0);
-              final stroke = 1.0 + (_taglineLive ? 0.018 : 0.055) * s;
-              final textFill = _taglineLive
-                  ? Color.lerp(_slate, _paper, 0.88 + 0.12 * s * s)
-                  : Color.lerp(_slate, _paper, 0.2 + 0.8 * s);
-              return Opacity(
-                opacity: opacity,
-                child: Transform.scale(
-                  scale: stroke,
-                  alignment: Alignment.centerLeft,
-                  child: DecoratedBox(
-                    decoration: s > 0.06
-                        ? BoxDecoration(
-                            boxShadow: [
-                              BoxShadow(
-                                color: accent.withValues(alpha: 0.5 * s),
-                                blurRadius: 36 * s,
-                                spreadRadius: 1.5 * s,
-                              ),
-                            ],
-                          )
-                        : const BoxDecoration(),
-                    child: Text(
-                      _tag,
-                      textAlign: TextAlign.left,
-                      style: TextStyle(
-                        fontSize: tagSize,
-                        fontWeight: FontWeight.w600,
-                        height: 1.22,
-                        letterSpacing: tagTrack,
-                        color: textFill,
+        // 3. ANIMATED RULE  ────────────────────────────────────────
+        AnimatedBuilder(
+          animation: Listenable.merge([_intro, _idle]),
+          builder: (context, _) {
+            final introT = Curves.easeOutCubic.transform(
+              ((_intro.value - 0.55) / 0.30).clamp(0.0, 1.0),
+            );
+            final breath = (sin(_idle.value * 2 * pi) + 1) / 2;
+            final width = ruleWidth * introT;
+            return SizedBox(
+              height: 8,
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Positioned(
+                    left: 0,
+                    top: 3,
+                    child: Container(
+                      width: width,
+                      height: 1.2,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            _accent.withValues(
+                                alpha: 0.55 + 0.30 * breath),
+                            _accent.withValues(alpha: 0.0),
+                          ],
+                        ),
                       ),
                     ),
                   ),
+                  if (introT > 0.05)
+                    Positioned(
+                      left: width - 4,
+                      top: 0.5,
+                      child: Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: _accent.withValues(
+                              alpha: 0.55 + 0.45 * breath),
+                          boxShadow: [
+                            BoxShadow(
+                              color: _accent.withValues(
+                                  alpha: 0.35 + 0.35 * breath),
+                              blurRadius: 9 + 6 * breath,
+                              spreadRadius: 0.5,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            );
+          },
+        ),
+
+        SizedBox(height: compact ? 18 : 26),
+
+        // 4. EDITORIAL TAGLINE  ────────────────────────────────────
+        FadeTransition(
+          opacity: _intoCurve(0.65, 0.95),
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.25),
+              end: Offset.zero,
+            ).animate(_intoCurve(0.65, 0.95)),
+            child: Text(
+              'Encrypted by you.  Trusted only by you.',
+              style: TextStyle(
+                color: _ink.withValues(alpha: 0.82),
+                fontSize: compact ? 14 : 17,
+                fontWeight: FontWeight.w300,
+                fontStyle: FontStyle.italic,
+                height: 1.45,
+                letterSpacing: 0.2,
+              ),
+            ),
+          ),
+        ),
+
+        SizedBox(height: compact ? 22 : 32),
+
+        // 5. STATUS PILL  ──────────────────────────────────────────
+        FadeTransition(
+          opacity: _intoCurve(0.78, 1.0),
+          child: AnimatedBuilder(
+            animation: _idle,
+            builder: (context, _) {
+              final pulse =
+                  (sin(_idle.value * 2 * pi * 1.4) + 1) / 2;
+              return Container(
+                padding: EdgeInsets.symmetric(
+                  horizontal: compact ? 10 : 12,
+                  vertical: compact ? 5 : 6,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0a1628).withValues(alpha: 0.55),
+                  borderRadius: BorderRadius.circular(99),
+                  border: Border.all(
+                    color: _accent.withValues(alpha: 0.18),
+                    width: 1,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _live.withValues(alpha: 0.55 + 0.45 * pulse),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _live.withValues(alpha: 0.5 * pulse),
+                            blurRadius: 6,
+                            spreadRadius: 0.5,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      'ENCRYPTED LOCALLY',
+                      style: TextStyle(
+                        color: _ink.withValues(alpha: 0.72),
+                        fontSize: compact ? 10 : 11,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 1.8,
+                      ),
+                    ),
+                  ],
                 ),
               );
             },
@@ -1574,22 +2079,92 @@ class _BrandHeroState extends State<_BrandHero> with TickerProviderStateMixin {
   }
 }
 
-// Constants for a balanced wordmark : tagline ratio (tuned once).
-class _WordmarkScale {
-  const _WordmarkScale();
-  static const _compact = 48.0;
-  static const _full = 76.0;
-  // Tracking as fraction of display size (tight cap height for two lines).
-  static const _trackK = 0.07;
-  // Subline: editorial, not a second headline (ca. 1:4.5 to word).
-  static const _tagToWord = 0.21;
-  static const _tagLineTrackK = 0.16;
-  static const _belowK = 0.16;
-  double fontSizeFor({required bool compact}) => compact ? _compact : _full;
-  double get trackingK => _trackK;
-  double get tagToWordK => _tagToWord;
-  double get tagLineTrackK => _tagLineTrackK;
-  double get belowTagGapK => _belowK;
+/// Geometric brand glyph between CIPHER and NEST. Concentric diamonds
+/// (outer stroke + inner solid) with a soft cyan halo that breathes.
+class _DiamondMark extends CustomPainter {
+  _DiamondMark({required this.breath});
+  final double breath;
+
+  static const _accent = Color(0xFF22d3ee);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = Offset(size.width / 2, size.height / 2);
+    final r = size.width * 0.42;
+
+    canvas.drawCircle(
+      c,
+      r * 1.1,
+      Paint()
+        ..color = _accent.withValues(alpha: 0.10 + 0.10 * breath)
+        ..maskFilter = MaskFilter.blur(BlurStyle.normal, 14 + 6 * breath),
+    );
+
+    final outer = Path()
+      ..moveTo(c.dx, c.dy - r)
+      ..lineTo(c.dx + r, c.dy)
+      ..lineTo(c.dx, c.dy + r)
+      ..lineTo(c.dx - r, c.dy)
+      ..close();
+    canvas.drawPath(
+      outer,
+      Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = max(1.2, size.width * 0.025)
+        ..shader = const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFFDBF0FF), _accent],
+        ).createShader(Rect.fromCircle(center: c, radius: r)),
+    );
+
+    final innerR = r * 0.46;
+    final inner = Path()
+      ..moveTo(c.dx, c.dy - innerR)
+      ..lineTo(c.dx + innerR, c.dy)
+      ..lineTo(c.dx, c.dy + innerR)
+      ..lineTo(c.dx - innerR, c.dy)
+      ..close();
+    canvas.drawPath(
+      inner,
+      Paint()
+        ..color = _accent.withValues(alpha: 0.65 + 0.25 * breath)
+        ..style = PaintingStyle.fill,
+    );
+
+    canvas.drawCircle(
+      c,
+      r * 0.10,
+      Paint()..color = Colors.white.withValues(alpha: 0.92),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _DiamondMark old) => old.breath != breath;
+}
+
+/// Translates the wordmark's ShaderMask gradient horizontally so the
+/// cyan highlight band sweeps across CIPHER · NEST. With the gradient's
+/// `tileMode: TileMode.mirror`, translating it produces a continuous
+/// back-and-forth flow with no visual discontinuity at the loop point.
+///
+/// Driven by `_idle.value` (0..1, 6s repeat), so the wordmark "color
+/// flow" stays in rhythm with the rule, the diamond breath, and the
+/// status pill.
+class _ShimmerSweep extends GradientTransform {
+  const _ShimmerSweep(this.phase);
+
+  /// 0..1, wraps. Comes from the idle controller.
+  final double phase;
+
+  @override
+  Matrix4? transform(Rect bounds, {TextDirection? textDirection}) {
+    // Translate the gradient by ±width across one full phase cycle.
+    // The mirror tile-mode means the highlight glides right, then back
+    // left, then right again — no abrupt reset at phase=1.
+    final dx = bounds.width * (phase * 2.0 - 1.0);
+    return Matrix4.identity()..translate(dx);
+  }
 }
 
 /// Renders [text] as a Row of single-character Texts so each glyph can
@@ -1650,8 +2225,6 @@ class _StaggeredWordmark extends StatelessWidget {
     );
   }
 }
-
-enum _RecoveryChoice { cancel, recover, destroy }
 
 class _PhraseGrid extends StatelessWidget {
   const _PhraseGrid({required this.words});
@@ -1812,7 +2385,7 @@ class _LockoutBanner extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   '$failureCount failed attempts. Password unlock is disabled. '
-                  'Tap “Forgot master password?” to recover with your phrase.',
+                  'Tap “Can’t unlock?” for recovery (phrase, backup, or test phrase).',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.85),
                     fontSize: 12,

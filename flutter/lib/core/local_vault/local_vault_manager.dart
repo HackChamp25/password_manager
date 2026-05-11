@@ -370,6 +370,116 @@ class LocalVaultManager {
     }
   }
 
+  /// Change the master password while the vault is unlocked. The user
+  /// supplies their current password (which we verify against the
+  /// existing K_pwd → MDK wrap) and a new password. On success we:
+  ///   • Generate a fresh password salt.
+  ///   • Re-derive K_pwd' from (newPassword, freshSalt).
+  ///   • Re-wrap the in-memory MDK with K_pwd'.
+  ///   • Atomically write the new salt and new wrap.pwd.
+  ///
+  /// The MDK never changes, so all encrypted entries on disk remain
+  /// readable without re-encrypting them. The recovery phrase wrap and
+  /// biometric wrap are also unaffected — they're independent paths
+  /// onto the same MDK.
+  ///
+  /// On verification failure we leave everything on disk untouched.
+  Future<UnlockResult> changeMasterPassword({
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    final mdk = _mdk;
+    if (mdk == null) {
+      return UnlockResult(
+        success: false,
+        message: 'Vault must be unlocked to change the master password.',
+      );
+    }
+    if (newPassword.length < minPasswordLength) {
+      return UnlockResult(
+        success: false,
+        message:
+            'New master password must be at least $minPasswordLength characters long',
+      );
+    }
+    if (currentPassword == newPassword) {
+      return UnlockResult(
+        success: false,
+        message: 'New password must differ from the current one.',
+      );
+    }
+
+    try {
+      // Verify the current password by re-deriving K_pwd, unwrapping the
+      // existing wrap.pwd, and confirming the unwrapped key equals the
+      // currently-loaded MDK. If wrap.pwd doesn't exist (legacy single-
+      // key vault that hasn't been touched since unlock), fall back to
+      // checking K_pwd against the verify file directly.
+      final salt = await _loadOrCreateSalt();
+      final kPwdCurrent = await pbkdf2HmacSha256Async(
+        Uint8List.fromList(utf8.encode(currentPassword)),
+        salt,
+      );
+      final wrapPwdPath = await LocalVaultPaths.passwordWrapFile();
+      var verified = false;
+      if (File(wrapPwdPath).existsSync()) {
+        try {
+          final token = (await File(wrapPwdPath).readAsString()).trim();
+          final unwrapped = decryptVaultSecret(kPwdCurrent, token);
+          verified = _bytesEqual(unwrapped, mdk);
+          bestEffortZero(unwrapped);
+        } catch (_) {
+          verified = false;
+        }
+      } else {
+        verified = await _verifyMdkAgainstFile(kPwdCurrent);
+      }
+      bestEffortZero(kPwdCurrent);
+      if (!verified) {
+        return UnlockResult(
+          success: false,
+          message: 'Current master password is incorrect.',
+        );
+      }
+
+      // Rotate password salt + re-wrap MDK with the new password.
+      final newSalt = secureRandomBytes(32);
+      final kPwdNew = await pbkdf2HmacSha256Async(
+        Uint8List.fromList(utf8.encode(newPassword)),
+        newSalt,
+      );
+      final newWrap = encryptVaultSecret(kPwdNew, mdk);
+      await atomicWriteBytes(await LocalVaultPaths.saltFile(), newSalt);
+      await atomicWriteString(
+        await LocalVaultPaths.passwordWrapFile(),
+        newWrap,
+      );
+      bestEffortZero(kPwdNew);
+
+      return UnlockResult(
+        success: true,
+        message: 'Master password updated.',
+      );
+    } catch (e) {
+      return UnlockResult(
+        success: false,
+        message: 'Failed to change master password: $e',
+      );
+    }
+  }
+
+  /// Constant-time-ish equality for two byte arrays. We don't strictly
+  /// need timing-safety here (the comparison is against an in-memory
+  /// MDK, not a remote secret) but it costs nothing.
+  bool _bytesEqual(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+  }
+
   /// Generate a brand-new recovery phrase and re-wrap the MDK with it. Used
   /// when the user wants to rotate their phrase (e.g. after suspecting it
   /// leaked). Vault must be unlocked.
@@ -922,35 +1032,51 @@ class LocalVaultManager {
     return m.keys.cast<String>().toList()..sort();
   }
 
+  /// Decrypts an opaque, possibly-empty encrypted field using the vault key.
+  /// Returns empty string on failure (legacy migrations, corrupt data).
+  String _maybeDecryptString(Uint8List raw, String? envelope) {
+    if (envelope == null || envelope.isEmpty) return '';
+    try {
+      return utf8.decode(decryptVaultSecret(raw, envelope));
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// Encrypts a UTF-8 string under the vault key. Returns empty string for
+  /// empty input so we don't waste an envelope on a known-blank field.
+  String _maybeEncryptString(Uint8List raw, String value) {
+    if (value.isEmpty) return '';
+    return encryptVaultSecret(
+      raw,
+      Uint8List.fromList(utf8.encode(value)),
+    );
+  }
+
   Credential _decodeEntry(String site, Map<String, dynamic> v, Uint8List raw) {
+    // Username/password were always encrypted; legacy entries may have
+    // them populated even for non-login records (zero-length plaintext
+    // round-trips fine).
     final uB = v['username'] as String? ?? '';
     final pB = v['password'] as String? ?? '';
-    final uDec = utf8.decode(decryptVaultSecret(raw, uB));
-    final pDec = utf8.decode(decryptVaultSecret(raw, pB));
-    var notes = '';
-    final nB = v['notes'] as String?;
-    if (nB != null && nB.isNotEmpty) {
-      try {
-        notes = utf8.decode(decryptVaultSecret(raw, nB));
-      } catch (_) {
-        notes = '';
-      }
-    }
-    final cat = (v['category'] as String?)?.trim() ?? '';
+    final uDec = uB.isEmpty ? '' : utf8.decode(decryptVaultSecret(raw, uB));
+    final pDec = pB.isEmpty ? '' : utf8.decode(decryptVaultSecret(raw, pB));
 
-    // TOTP secret is encrypted in the same envelope (AES-256-GCM under
-    // the MDK), so it never sits in plaintext on disk.
-    var totpSecret = '';
-    final tB = v['totpSecret'] as String?;
-    if (tB != null && tB.isNotEmpty) {
-      try {
-        totpSecret = utf8.decode(decryptVaultSecret(raw, tB));
-      } catch (_) {
-        totpSecret = '';
-      }
-    }
+    final notes = _maybeDecryptString(raw, v['notes'] as String?);
+    final cat = (v['category'] as String?)?.trim() ?? '';
+    final totpSecret = _maybeDecryptString(raw, v['totpSecret'] as String?);
+
+    // Card fields share the same envelope scheme as usernames/passwords
+    // — every secret gets its own AES-256-GCM record under the MDK so a
+    // partial leak never reveals more than one field.
+    final cardName = _maybeDecryptString(raw, v['cardholderName'] as String?);
+    final cardNum = _maybeDecryptString(raw, v['cardNumber'] as String?);
+    final cardExp = _maybeDecryptString(raw, v['cardExpiry'] as String?);
+    final cardCvv = _maybeDecryptString(raw, v['cardCvv'] as String?);
+    final cardZip = _maybeDecryptString(raw, v['cardZip'] as String?);
 
     return Credential(
+      kind: ItemKind.fromWire(v['kind'] as String?),
       site: site,
       username: uDec,
       password: pDec,
@@ -966,38 +1092,44 @@ class LocalVaultManager {
               ? (v['totpAlgorithm'] as String)
               : 'SHA1',
       totpIssuer: (v['totpIssuer'] as String?)?.trim() ?? '',
+      cardholderName: cardName,
+      cardNumber: cardNum,
+      cardExpiry: cardExp,
+      cardCvv: cardCvv,
+      cardBrand: (v['cardBrand'] as String?)?.trim() ?? '',
+      cardZip: cardZip,
+      createdAt: (v['createdAt'] as String?) ?? '',
+      passwordUpdatedAt: (v['passwordUpdatedAt'] as String?) ?? '',
     );
   }
 
   Map<String, dynamic> _encodeEntry(Credential c) {
     final raw = _vaultKey;
-    final u = Uint8List.fromList(utf8.encode(c.username.trim()));
-    final p = Uint8List.fromList(utf8.encode(c.password));
-    var notesEnc = '';
-    if (c.notes.isNotEmpty) {
-      notesEnc =
-          encryptVaultSecret(raw, Uint8List.fromList(utf8.encode(c.notes)));
-    }
-    var totpEnc = '';
-    if (c.totpSecret.trim().isNotEmpty) {
-      totpEnc = encryptVaultSecret(
-        raw,
-        Uint8List.fromList(utf8.encode(c.totpSecret.trim())),
-      );
-    }
     final cat = c.category.trim();
     return {
-      'username': encryptVaultSecret(raw, u),
-      'password': encryptVaultSecret(raw, p),
-      'notes': notesEnc,
+      'kind': c.kind.wire,
+      'username': _maybeEncryptString(raw, c.username.trim()),
+      'password': _maybeEncryptString(raw, c.password),
+      'notes': _maybeEncryptString(raw, c.notes),
       'url': c.url.trim(),
       'favorite': c.favorite,
       'category': cat.isEmpty ? 'General' : cat,
-      'totpSecret': totpEnc,
+      'totpSecret': _maybeEncryptString(raw, c.totpSecret.trim()),
       'totpDigits': c.totpDigits,
       'totpPeriod': c.totpPeriod,
       'totpAlgorithm': c.totpAlgorithm,
       'totpIssuer': c.totpIssuer.trim(),
+      'cardholderName': _maybeEncryptString(raw, c.cardholderName.trim()),
+      'cardNumber': _maybeEncryptString(
+        raw,
+        c.cardNumber.replaceAll(RegExp(r'\s+'), ''),
+      ),
+      'cardExpiry': _maybeEncryptString(raw, c.cardExpiry.trim()),
+      'cardCvv': _maybeEncryptString(raw, c.cardCvv.trim()),
+      'cardBrand': c.cardBrand.trim(),
+      'cardZip': _maybeEncryptString(raw, c.cardZip.trim()),
+      'createdAt': c.createdAt,
+      'passwordUpdatedAt': c.passwordUpdatedAt,
     };
   }
 
@@ -1012,21 +1144,41 @@ class LocalVaultManager {
     return out;
   }
 
-  Future<void> addCredential(Credential c) async {
-    if (c.password.isEmpty) {
-      throw StateError('Password cannot be empty');
+  /// Per-kind validation. Logins must have a username + password; notes
+  /// must have a non-empty body; cards must have a number. The site/title
+  /// is always required (it is also the storage map key).
+  void _validateForKind(Credential c) {
+    switch (c.kind) {
+      case ItemKind.login:
+        if (c.password.isEmpty) {
+          throw StateError('Password cannot be empty');
+        }
+        _validateUser(c.username);
+        break;
+      case ItemKind.note:
+        if (c.notes.trim().isEmpty) {
+          throw StateError('Note body cannot be empty');
+        }
+        break;
+      case ItemKind.card:
+        final digits = c.cardNumber.replaceAll(RegExp(r'\s+'), '');
+        if (digits.length < 8) {
+          throw StateError('Card number is too short');
+        }
+        break;
     }
+  }
+
+  Future<void> addCredential(Credential c) async {
+    _validateForKind(c);
     final vs = _validateSite(c.site);
-    _validateUser(c.username);
     final m = await _loadMap();
     m[vs] = _encodeEntry(c);
     await _saveMap(m);
   }
 
   Future<void> updateCredential(String oldSite, Credential c) async {
-    if (c.password.isEmpty) {
-      throw StateError('Password cannot be empty');
-    }
+    _validateForKind(c);
     final os = _validateSite(oldSite);
     final m = await _loadMap();
     if (!m.containsKey(os)) {
@@ -1034,7 +1186,6 @@ class LocalVaultManager {
     }
     m.remove(os);
     final vs = _validateSite(c.site);
-    _validateUser(c.username);
     m[vs] = _encodeEntry(c);
     await _saveMap(m);
   }

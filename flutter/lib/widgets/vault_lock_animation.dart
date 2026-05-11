@@ -138,6 +138,20 @@ class VaultLockAnimationState extends State<VaultLockAnimation>
   }
 }
 
+/// Process-wide cache for the static body+shackle gradients in
+/// [_ProLockPainter]. These shaders only depend on the painter's Size,
+/// so we recreate them at most once per size change instead of once
+/// per paint (~60 fps under the idle controller — was the dominant
+/// allocator on the login screen).
+class _LockShaderCache {
+  _LockShaderCache(this.size, this.body, this.shackle);
+  final Size size;
+  final Shader body;
+  final Shader shackle;
+}
+
+_LockShaderCache? _lockShaderCache;
+
 class _ProLockPainter extends CustomPainter {
   _ProLockPainter({
     required this.shackleLift,
@@ -155,23 +169,14 @@ class _ProLockPainter extends CustomPainter {
   final double fillProgress;
   final bool unlocked;
 
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height * 0.58);
-    final bodyR = size.width * 0.32;
-
-    // Outer aura.
-    final aura = Paint()
-      ..color = const Color(0xFF22d3ee)
-          .withValues(alpha: 0.10 + glow * 0.18 + idlePulse * 0.05)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 28);
-    canvas.drawCircle(center, bodyR + 22, aura);
-
-    // Shackle (drawn before body so body covers its base ends).
-    _drawShackle(canvas, center, bodyR);
-
-    // Lock body — premium dark steel disc.
-    final bodyShader = const RadialGradient(
+  _LockShaderCache _shadersFor(Size size, Offset center, double bodyR) {
+    final cached = _lockShaderCache;
+    if (cached != null &&
+        cached.size.width.round() == size.width.round() &&
+        cached.size.height.round() == size.height.round()) {
+      return cached;
+    }
+    final body = const RadialGradient(
       center: Alignment(-0.3, -0.4),
       radius: 1.0,
       colors: [
@@ -181,7 +186,54 @@ class _ProLockPainter extends CustomPainter {
       ],
       stops: [0.0, 0.55, 1.0],
     ).createShader(Rect.fromCircle(center: center, radius: bodyR));
-    canvas.drawCircle(center, bodyR, Paint()..shader = bodyShader);
+
+    // The shackle's bounding rect technically moves with `shackleLift`
+    // during the unlock animation, but the *gradient* is identical —
+    // top-left bright steel to bottom-right dark steel. Building it
+    // once at a canonical rect and reusing it is visually
+    // indistinguishable from rebuilding every frame.
+    final shackleHalfW = bodyR * 0.50;
+    final shackleRect = Rect.fromLTRB(
+      center.dx - shackleHalfW - 6,
+      center.dy - bodyR - shackleHalfW + 4,
+      center.dx + shackleHalfW + 6,
+      center.dy - bodyR + 12,
+    );
+    final shackle = const LinearGradient(
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+      colors: [
+        Color(0xFFf1f5f9),
+        Color(0xFFcbd5e1),
+        Color(0xFF64748b),
+        Color(0xFF334155),
+      ],
+      stops: [0.0, 0.35, 0.75, 1.0],
+    ).createShader(shackleRect);
+
+    final fresh = _LockShaderCache(size, body, shackle);
+    _lockShaderCache = fresh;
+    return fresh;
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height * 0.58);
+    final bodyR = size.width * 0.32;
+    final shaders = _shadersFor(size, center, bodyR);
+
+    // Outer aura.
+    final aura = Paint()
+      ..color = const Color(0xFF22d3ee)
+          .withValues(alpha: 0.10 + glow * 0.18 + idlePulse * 0.05)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 28);
+    canvas.drawCircle(center, bodyR + 22, aura);
+
+    // Shackle (drawn before body so body covers its base ends).
+    _drawShackle(canvas, center, bodyR, shaders.shackle);
+
+    // Lock body — premium dark steel disc (cached shader).
+    canvas.drawCircle(center, bodyR, Paint()..shader = shaders.body);
 
     // Subtle inner edge highlight ring.
     canvas.drawCircle(
@@ -285,7 +337,12 @@ class _ProLockPainter extends CustomPainter {
     );
   }
 
-  void _drawShackle(Canvas canvas, Offset center, double bodyR) {
+  void _drawShackle(
+    Canvas canvas,
+    Offset center,
+    double bodyR,
+    Shader shackleShader,
+  ) {
     // Proper U-shape: two straight legs joined by a true semicircular arc.
     final shackleHalfW = bodyR * 0.50;
     final legLen = bodyR * 0.42;
@@ -310,13 +367,6 @@ class _ProLockPainter extends CustomPainter {
       )
       ..lineTo(rightX, legBaseY);
 
-    final shackleRect = Rect.fromLTRB(
-      leftX - 6,
-      arcCenterY - shackleHalfW - 4,
-      rightX + 6,
-      legBaseY + 4,
-    );
-
     // Outer dark stroke for depth.
     canvas.drawPath(
       path,
@@ -327,24 +377,15 @@ class _ProLockPainter extends CustomPainter {
         ..color = const Color(0xFF0b1220).withValues(alpha: 0.85),
     );
 
-    // Main metallic stroke.
+    // Main metallic stroke uses the cached shader (was the dominant
+    // per-frame allocation before).
     canvas.drawPath(
       path,
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeCap = StrokeCap.round
         ..strokeWidth = 11
-        ..shader = const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [
-            Color(0xFFf1f5f9),
-            Color(0xFFcbd5e1),
-            Color(0xFF64748b),
-            Color(0xFF334155),
-          ],
-          stops: [0.0, 0.35, 0.75, 1.0],
-        ).createShader(shackleRect),
+        ..shader = shackleShader,
     );
 
     // Crisp inner highlight.

@@ -113,7 +113,14 @@ class AppSettingsProvider extends ChangeNotifier {
     if (minutes <= 0) return;
     final onLock = _onLockRequested;
     if (onLock == null) return;
-    _lockTimer = Timer(Duration(minutes: minutes), onLock);
+    // Defer the actual lock to a post-frame callback. Without this, if the
+    // timer fires while the framework is mid-build (rare but possible during
+    // long synchronous work), `vault.lock()` would call notifyListeners()
+    // inside that build and tear down a Consumer subtree mid-walk — same
+    // class of bug as the manual Lock button.
+    _lockTimer = Timer(Duration(minutes: minutes), () {
+      WidgetsBinding.instance.addPostFrameCallback((_) => onLock());
+    });
   }
 
   Future<void> setThemeMode(ThemeMode mode) async {

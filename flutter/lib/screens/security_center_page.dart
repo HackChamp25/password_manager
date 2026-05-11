@@ -16,6 +16,7 @@ class SecurityCenterPage extends StatelessWidget {
       builder: (context, vault, _) {
         final issues = VaultInsights.analyze(vault.credentials);
         final score = VaultInsights.healthScorePercent(issues);
+        final breakdown = VaultInsights.breakdown(vault.credentials);
 
         return CustomScrollView(
           slivers: [
@@ -36,7 +37,7 @@ class SecurityCenterPage extends StatelessWidget {
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            'Reuse and weak-password hints — all computed locally.',
+                            'Reuse, weak-password and aging hints — all computed locally.',
                             style: theme.textTheme.bodyMedium?.copyWith(
                               color: theme.colorScheme.onSurfaceVariant,
                             ),
@@ -81,6 +82,12 @@ class SecurityCenterPage extends StatelessWidget {
                     ),
                   ],
                 ),
+              ),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(24, 4, 24, 16),
+              sliver: SliverToBoxAdapter(
+                child: _BreakdownStrip(breakdown: breakdown),
               ),
             ),
             const SliverPadding(
@@ -389,5 +396,94 @@ class _IntrusionEventTile extends StatelessWidget {
           'Lockout cleared'
         );
     }
+  }
+}
+
+// ===========================================================================
+// Per-kind composition strip — shows the user what's actually in the vault.
+// ===========================================================================
+class _BreakdownStrip extends StatelessWidget {
+  const _BreakdownStrip({required this.breakdown});
+  final KindBreakdown breakdown;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    Widget tile({
+      required IconData icon,
+      required String label,
+      required int count,
+      required Color tint,
+    }) {
+      return Expanded(
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          decoration: BoxDecoration(
+            color: tint.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: tint.withValues(alpha: 0.25)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: tint.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: tint, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '$count',
+                    style: theme.textTheme.titleLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  Text(
+                    label,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 4, bottom: 4),
+      child: Row(
+        children: [
+          tile(
+            icon: Icons.shield_outlined,
+            label: 'Logins',
+            count: breakdown.logins,
+            tint: theme.colorScheme.primary,
+          ),
+          tile(
+            icon: Icons.sticky_note_2_outlined,
+            label: 'Secure notes',
+            count: breakdown.notes,
+            tint: theme.colorScheme.tertiary,
+          ),
+          tile(
+            icon: Icons.credit_card_outlined,
+            label: 'Cards',
+            count: breakdown.cards,
+            tint: theme.colorScheme.secondary,
+          ),
+        ],
+      ),
+    );
   }
 }
