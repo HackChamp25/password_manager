@@ -6,7 +6,7 @@ should be ready to answer when you say *"I built a desktop password manager
 with end-to-end encryption."*
 
 > Read this top-to-bottom once. Then re-read sections **3 (Crypto Core)**,
-> **4 (MDK Architecture)** and **12 (Interview Q&A)** the night before any
+> **4 (MDK Architecture)** and **13 (Interview Q&A)** the night before any
 > security interview.
 
 ---
@@ -22,10 +22,11 @@ with end-to-end encryption."*
 7. [Defense-in-Depth Beyond Crypto](#7-defense-in-depth-beyond-crypto)
 8. [Native Windows Integration](#8-native-windows-integration)
 9. [Code Tour — What Lives Where](#9-code-tour--what-lives-where)
-10. [Why Flutter Desktop?](#10-why-flutter-desktop)
-11. [What's NOT in Scope (Honest Tradeoffs)](#11-whats-not-in-scope-honest-tradeoffs)
-12. [Cybersecurity Interview Q&A](#12-cybersecurity-interview-qa)
-13. [Glossary](#13-glossary)
+10. [UX Architecture & Stability Engineering](#10-ux-architecture--stability-engineering)
+11. [Why Flutter Desktop?](#11-why-flutter-desktop)
+12. [What's NOT in Scope (Honest Tradeoffs)](#12-whats-not-in-scope-honest-tradeoffs)
+13. [Cybersecurity Interview Q&A](#13-cybersecurity-interview-qa)
+14. [Glossary](#14-glossary)
 
 ---
 
@@ -54,6 +55,14 @@ with end-to-end encryption."*
 > best-effort memory zeroing of derived keys, clipboard auto-clear after
 > 30–45 seconds, atomic file writes, OS-level dark mode, and a screen-
 > capture protection flag.
+>
+> Beyond the crypto core, the product layer ships a **kind-aware vault**
+> (logins, secure notes, payment cards), **Password DNA** visual reuse
+> detection, **offline crack-time estimates**, in-place **master-password
+> rotation** (no vault re-encryption), printable **Emergency Kit export**,
+> **Diceware-style passphrase generation**, and a **Ctrl+K command
+> palette** — all under the same MDK envelope, all offline, all zero-
+> knowledge.
 
 ---
 
@@ -573,6 +582,89 @@ This migration is **transparent** — the user never sees an upgrade
 dialog, just sees their vault open and a "save your new recovery
 phrase" prompt.
 
+### 6.10 Change master password (`changeMasterPassword`)
+
+The single best demonstration of why the MDK indirection earns its
+keep. When a logged-in user rotates their master password, **no entry
+on disk is re-encrypted**. The lifecycle is:
+
+1. Vault must be unlocked. We already hold the in-memory MDK.
+2. Verify the user knows the current password before mutating anything:
+   - Re-derive `K_pwd_current = PBKDF2(currentPassword, salt.salt, 600k)`.
+   - Unwrap `wrap.pwd` with `K_pwd_current`. **Compare the unwrapped
+     bytes against the in-memory MDK** using a length-prefixed XOR
+     loop (`_bytesEqual`). Both must match — defending against the
+     edge case where the file has been swapped under us between
+     unlock and rotation.
+3. Generate a fresh **password salt** (32 random bytes).
+4. Derive `K_pwd_new = PBKDF2(newPassword, newSalt, 600k)`.
+5. `wrap.pwd ← AES-GCM(K_pwd_new, MDK)`.
+6. Atomically write `salt.salt` and `wrap.pwd`. Two file writes total.
+7. `bestEffortZero` both derived keys.
+
+What stays untouched after a successful rotation:
+
+| File | Why it's unaffected |
+|---|---|
+| `vault.json` | Every entry is encrypted under the MDK, which didn't change |
+| `verify.key` | Same — encrypted under MDK |
+| `salt.phrase` / `wrap.phrase` | Recovery phrase is an **independent** path onto the MDK |
+| `key.device` / `wrap.device` | Hello quick-unlock is independent too |
+| Intrusion log | Metadata only — not key material |
+
+This is what "non-destructive key rotation" looks like in practice and
+is the same property you get from LUKS key-slot operations or
+1Password's account-key rotation. The whole operation completes in
+milliseconds because we never re-encrypt user data.
+
+If the current-password verification fails, no file is touched and we
+return `success: false, message: "Current master password is
+incorrect."` — the user can retry indefinitely against the in-memory
+MDK without involving the persistent intrusion log (this is an
+authenticated user already inside the vault, not a brute-force
+attacker at the gate).
+
+### 6.11 Emergency Kit export
+
+Many users will create a vault, never write down the phrase, and lose
+access forever the day they reformat their machine. The Emergency Kit
+addresses that with a **single printable plaintext document** that
+contains everything needed to recover the vault on any machine.
+
+When the user reveals their recovery phrase (Settings → Recovery &
+Backup → Reveal phrase), they get a `Save Emergency Kit (.txt)`
+button. It writes to:
+
+```
+%USERPROFILE%\Documents\CipherNest\EmergencyKit\
+    CipherNest-EmergencyKit-<ISO-8601-timestamp>.txt
+```
+
+The file contains:
+
+1. Generation timestamp + local hostname (so the user can tell which
+   install it came from).
+2. The 24 words formatted in a 4-column grid, padded and aligned for
+   the human eye.
+3. A two-path recovery walkthrough:
+   - **Path A** — phrase only: install Cipher Nest, hit "Recovery
+     options" on the lock screen, paste 24 words, set a new password.
+   - **Path B** — phrase + `.cnest` backup: same flow via "Restore
+     from encrypted backup."
+4. A short technical addendum (PBKDF2 + AES-256-GCM + BIP-39).
+5. A "Treat this document like cash" warning in the header and footer.
+
+**Why plaintext?** Because the user is going to *print* and *physically
+store* this. Encrypting it would force them to keep a separate
+recovery secret for the kit itself, recursively. The threat model for
+this artifact is "lives in a safe" or "lives in a sealed envelope" —
+the encryption boundary is the physical world, not the file system.
+
+We make the threat model explicit by surfacing the path in a snackbar
+with a one-tap `COPY PATH` button so the user can immediately move
+the file off the disk after generating it. The kit is created on
+demand, never auto-generated, never synced.
+
 ---
 
 ## 7. Defense-in-Depth Beyond Crypto
@@ -870,7 +962,8 @@ flutter/lib/
 ├── core/local_vault/
 │   ├── local_crypto.dart                  ★ PBKDF2, AES-GCM, helpers
 │   ├── local_vault_paths.dart             — file path resolver
-│   ├── local_vault_manager.dart           ★ MDK architecture, lifecycle
+│   ├── local_vault_manager.dart           ★ MDK architecture, lifecycle,
+│   │                                          changeMasterPassword
 │   ├── recovery_phrase.dart               — BIP-39 generate/normalize/validate
 │   └── bip39_wordlist.dart                — 2048 official BIP-39 words
 │
@@ -883,27 +976,49 @@ flutter/lib/
 │   ├── secure_clipboard.dart              — copy + auto-clear
 │   ├── intrusion_log.dart                 — persistent failed-unlock log + lockout
 │   ├── totp.dart                          ★ RFC 6238 TOTP + base32 + otpauth parser
-│   └── vault_insights.dart                — reuse / weak-password / 2FA coverage
+│   └── vault_insights.dart                — reuse / weak-password / 2FA coverage,
+│                                              kind breakdown
 │
-├── models/credential.dart                 — Credential value object (incl. TOTP fields)
+├── models/credential.dart                 ★ Credential value object — tagged
+│                                              union over ItemKind {login, note, card}
+│                                              with TOTP and card fields
 │
-├── utils/crypto_utils.dart                — local password generator + strength meter
+├── utils/
+│   ├── crypto_utils.dart                  — random + passphrase generator,
+│   │                                          embedded Diceware wordlist,
+│   │                                          strength meter
+│   └── crack_time.dart                    — offline crack-time estimation
+│                                              (entropy → seconds → human label)
 │
 ├── widgets/
 │   ├── session_guard.dart                 — pointer listener → bumpActivity
 │   ├── totp_code_field.dart               — rotating 6-digit code + drain ring
 │   ├── totp_setup_section.dart            — Add/Edit "enable 2FA" section + disclosure
-│   └── vault_lock_animation.dart          — login screen lock visual
+│   ├── vault_lock_animation.dart          — login screen lock visual,
+│   │                                          shader-cached painter
+│   ├── password_dna.dart                  ★ SHA-256 visual fingerprint
+│   │                                          (reuse detection without reveal)
+│   ├── reveal_hold.dart                   — press-and-hold to reveal sensitive
+│   │                                          fields (shoulder-surf defense)
+│   ├── brand_logo.dart                    — woven-nest geometric mark
+│   └── command_palette.dart               ★ Ctrl+K Spotlight-style search +
+│                                              global actions
 │
 └── screens/
-    ├── login_screen.dart                  — entry UI, recovery flows, Hello chip
-    ├── app_shell.dart                     — navigation rail / bar
+    ├── login_screen.dart                  — entry UI, recovery hub, Hello chip,
+    │                                          matrix-rain background (shader-cached)
+    ├── app_shell.dart                     — IndexedStack + TickerMode +
+    │                                          RepaintBoundary per page,
+    │                                          Ctrl+K Shortcuts wrapper
     ├── vault_page.dart                    — credential list + detail + banner
-    ├── add_credential_screen.dart
-    ├── edit_credential_screen.dart
-    ├── password_generator_page.dart
-    ├── security_center_page.dart          — vault insights view
-    └── settings_page.dart                 — Recovery & Backup, Hello, theme, auto-lock
+    ├── item_editor_screen.dart            — unified add/edit form, adapts per
+    │                                          ItemKind (replaced legacy
+    │                                          add_credential / edit_credential)
+    ├── password_generator_page.dart       — Random + Passphrase mode segmented
+    ├── security_center_page.dart          — vault insights view (incl. kind strip)
+    └── settings_page.dart                 — Recovery & Backup, Master password
+                                              rotation, Emergency Kit export,
+                                              Hello, theme, auto-lock
 
 flutter/windows/runner/
 ├── main.cpp                               — wWinMain
@@ -920,7 +1035,499 @@ backend/                                   — optional Python FastAPI reference
 
 ---
 
-## 10. Why Flutter Desktop?
+## 10. UX Architecture & Stability Engineering
+
+The cryptographic core (§3–§7) gives us a secure vault. This section
+covers everything that turns a secure vault into a **product people
+will actually use without crashing or feeling sluggish**. Each
+subsection documents a specific engineering decision with the
+rationale and the failure mode it prevents — these are the patterns
+worth being able to defend in interviews.
+
+### 10.1 The Credential model is a tagged union over `ItemKind`
+
+The original schema was login-only: `{site, username, password, url,
+notes}`. Adding **Secure Notes** and **Payment Cards** required either:
+
+- (a) three separate classes + three storage tables + three editors, or
+- (b) one `Credential` class with an `ItemKind` discriminator and
+  kind-specific fields that are empty for the kinds that don't use
+  them.
+
+We picked (b). `models/credential.dart` defines:
+
+```dart
+enum ItemKind { login, note, card;
+  String get wire => name;        // 'login' | 'note' | 'card'
+  static ItemKind fromWire(String? s) { /* forward-compat fallback to login */ }
+}
+
+class Credential {
+  final ItemKind kind;
+  final String site;             // also serves as "title" for notes
+  final String username;         // login-only
+  final String password;         // login-only
+  final String notes;            // notes-only body
+  final String cardholderName, cardNumber, cardExpiry,
+               cardCvv, cardBrand, cardZip;   // card-only
+  // … TOTP fields, timestamps, etc.
+}
+```
+
+**Why a single class and not three subclasses?**
+
+1. **Vault storage is one encrypted JSON list.** With a single class,
+   serialization stays one `toJson` / `fromJson`. With subclasses
+   we'd need a tag discriminator at the JSON layer plus a polymorphic
+   deserializer — same complexity, more files.
+2. **`ItemKind.fromWire` is forward-compatible.** Any unknown kind in
+   an old/future vault falls back to `ItemKind.login` instead of
+   throwing. Users who downgrade and re-upgrade never lose data.
+3. **The editor (`item_editor_screen.dart`) is one form that
+   adapts.** Each field's `Visibility` is gated on the current kind.
+   This means the validation rules, the password DNA strip, the
+   crack-time pill, the favorite toggle — all share one
+   implementation across kinds.
+4. **Search stays kind-aware.** `VaultProvider.searchCredentials`
+   never searches encrypted card numbers (we explicitly filter them
+   out — there's no reason to enable substring lookup against a
+   secret); it does search cardholder name and brand.
+
+If we ever genuinely need divergent storage (e.g. encrypted file
+attachments per card), we add a `_files` list to the same class — the
+schema is already `version: 2` for exactly this reason.
+
+### 10.2 Password Intelligence
+
+Three small widgets that turn the vault from a list of secrets into a
+**security advisor**. None of them touch the network.
+
+#### Password DNA (`widgets/password_dna.dart`)
+
+A coloured strip of 6 cells per password. Computed as
+`SHA-256(password)` → first 6 bytes → each byte becomes a coloured
+rounded cell. Two properties matter:
+
+- **Identical passwords produce identical strips** — instant visual
+  reuse detection at a glance. You scroll the vault and see "ah, my
+  Twitter, my StackOverflow, and my Reddit all have the *same* DNA"
+  without ever revealing the password.
+- **6 bytes = 2⁴⁸ visual patterns**. Far too large to brute-force a
+  low-entropy password from its picture alone, and we render the
+  picture only — never the hex.
+
+We deliberately do **not** salt with the site name. The reuse-
+detection feature only works if the same password produces the same
+DNA across entries. The information leak from "this password is the
+same across these 4 sites" is a feature, not a flaw — it's the
+information we want the user to see.
+
+#### Crack-time estimation (`utils/crack_time.dart`)
+
+Offline estimate of how long an attacker would take to brute-force
+this specific string at a generous-to-the-attacker 10¹⁰ guesses/sec.
+The estimate uses Shannon entropy of the character set + length, plus
+a small penalty for repeated digrams. We surface it as a human label
+("≈ 4 trillion years to crack") and a risk bucket (TRIVIAL / WEAK /
+OK / STRONG / EXCELLENT) so the user gets a visceral sense of why
+the generator produces 20-character passwords by default.
+
+Why offline and not haveibeenpwned-style? Because the threat model
+is local-only, and zxcvbn-style entropy estimation is mature enough
+to be useful without leaving the machine.
+
+#### RevealHold (`widgets/reveal_hold.dart`)
+
+Press-and-hold to reveal the password, releases on mouse-up. Replaces
+the persistent "👁 toggle reveal" pattern, which was a shoulder-surf
+hazard (user clicks the eye, gets called away, password sits visible
+for 20 minutes).
+
+### 10.3 Recovery Hub redesign on the login screen
+
+The old login screen had an "Erase vault" button right next to
+"Recover." Two problems:
+
+1. **Destructive option presented at peer level with non-destructive
+   one.** Users with a forgotten password reflexively reach for
+   "Erase" because the visual hierarchy didn't tell them they should
+   prefer "Recover."
+2. **Erasure on the lock screen has no good reason to exist.** If you
+   can't unlock, you can't authorise destruction. We moved erasure
+   to Settings → Danger Zone (which requires an unlocked vault) and
+   gated it behind a `Type ERASE` confirmation dialog.
+
+The lock screen now shows a single quiet `Can't unlock? Recovery
+options` link, which opens a bottom sheet with three options:
+
+| Option | What it does |
+|---|---|
+| **Recover with recovery phrase** | The §6.4 flow. Phrase + new password → unlocked |
+| **Restore from encrypted backup** | The §6.7 flow. `.cnest` file + phrase + new password |
+| **Test recovery phrase** | Read-only check: derives K_phrase, attempts to unwrap, *throws away the result*. Lets a user verify they wrote the phrase down correctly **without** rotating anything |
+
+The "Test phrase" path is the unsung hero. It eliminates the
+"phrase that I never tested and now it doesn't work" failure mode
+that breaks people during a real recovery.
+
+### 10.4 Change master password in place
+
+Covered in §6.10. Worth reiterating the *operational* property in
+this section:
+
+> Master-password rotation is a 2-file write that costs less than 1
+> second of wall clock. It never touches `vault.json`. The recovery
+> phrase and biometric quick-unlock both keep working without any
+> further action from the user.
+
+The UI (`_ChangeMasterPasswordDialog`) is a `StatefulWidget` that
+owns its three `TextEditingController`s (current / new / confirm)
+via `State.dispose()` — see §10.7 for why this matters.
+
+### 10.5 Diceware-style passphrase generator
+
+The `Generator` page has two modes, switched via a `SegmentedButton`:
+
+| Mode | Output example | Use case |
+|---|---|---|
+| **Random** | `7vN!q9PxLkDw#3RtY2zM` | Vault-stored passwords; the user never types them |
+| **Passphrase** | `harbor-Cedar17-glide-prism-cobra` | Wi-Fi password, secondary email, anything the user must hand-type |
+
+The passphrase generator (`CryptoUtils.generatePassphrase`) draws
+words from an **embedded** 1,000-word list defined inline in
+`utils/crypto_utils.dart` (no asset loading — ships in-binary, ~5 KB).
+The list is curated:
+
+- 4–8 letter words only (easy to type).
+- No proper nouns, no offensive words, no easily-confused
+  homophones (`bear`/`bare`, `pear`/`pair`).
+- Each word is uniformly drawn from the list via `Random.secure()`
+  (the OS CSPRNG — same primitive as the recovery phrase).
+
+**Entropy math:**
+
+- 5 random words from a 1,000-word list = log₂(1000⁵) ≈ **49.8 bits**.
+- 6 words ≈ 59.8 bits.
+- The optional injected number adds ~6.6 bits; the optional capitalised
+  word adds ~2.3 bits.
+- A 5-word passphrase with both options is roughly equivalent to a
+  10-character random alphanumeric (which is ~60 bits), but with the
+  crucial difference that the user can actually *type it from
+  memory* without errors.
+
+We use a much smaller wordlist than BIP-39 (1,000 vs 2,048) because
+the BIP-39 list is designed for high-stakes, written-once seed
+phrases where 256 bits matters. For everyday passphrases, 50–60 bits
++ memorability is a better trade.
+
+### 10.6 Ctrl+K command palette
+
+`widgets/command_palette.dart` is a Spotlight-style overlay that:
+
+- **Fuzzy-searches every vault entry.** Scoring is tiered:
+  - exact site match → score 100
+  - prefix match → 70
+  - substring match → 50
+  - substring on username/url/cardholder/brand → 30
+  - subsequence (e.g. "gth" matches "github") → 10
+- **Default action on a credential** is `copy password (or card
+  number) → jump to Vault tab → snackbar`. This is the
+  "I just want to log into GitHub right now" path that's the most
+  common reason anyone opens a password manager — we collapse it to
+  three keystrokes (Ctrl+K, "git", Enter).
+- **Global actions** are mixed into the result list when relevant:
+  *Lock vault now*, *Generate strong password*, *Generate
+  passphrase*, *Open Security Center*, *Open Settings*. They show
+  the `ACTION` tag in the row so they never get confused with
+  credentials.
+- **Full keyboard control**: ↑/↓ to navigate, Enter to select,
+  Escape to dismiss. The arrow keys also keep the highlighted row
+  visible via `_scroll.animateTo`.
+- **Wired at the shell level.** `app_shell.dart` wraps its `Scaffold`
+  in `Shortcuts` + `Actions` listening for
+  `SingleActivator(LogicalKeyboardKey.keyK, control: true)` (and the
+  `meta: true` variant for Mac parity). Because the activator lives
+  on the shell, the palette is reachable from any tab and from any
+  dialog (showGeneralDialog inherits the same FocusScope).
+
+The palette never displays passwords inline — it only copies them
+through `SecureClipboard.copyAndScheduleClear` (30 s auto-wipe). The
+clipboard is the single secret-exposure surface, and it cleans up
+after itself.
+
+### 10.7 The `TextEditingController` lifecycle race (the bug that bit us)
+
+A class of crashes that **only** manifests when dialogs are
+involved. Worth being able to explain in detail.
+
+**The buggy pattern:**
+
+```dart
+final controller = TextEditingController();
+final result = await showDialog<bool>(
+  context: context,
+  builder: (ctx) => StatefulBuilder(
+    builder: (ctx, setInner) => AlertDialog(
+      content: TextField(
+        controller: controller,
+        onChanged: (v) => setInner(() => /* … */),
+      ),
+      actions: [ FilledButton(onPressed: () => Navigator.pop(ctx, true), child: Text('OK')) ],
+    ),
+  ),
+);
+controller.dispose();   // ← BUG
+// continue with `result`
+```
+
+**Why this crashes:** `await showDialog` resolves the instant
+`Navigator.pop` is called — but **the dialog is still
+mid-exit-animation** for the next ~200 ms. During those 200 ms the
+framework continues to rebuild the `TextField`'s subtree (cursor
+fades, exit transition rebuilds). If `controller.dispose()` runs
+before the dialog is fully removed, the next rebuild touches a
+disposed controller and we get the iconic:
+
+```
+A TextEditingController was used after being disposed.
+```
+
+**The fix is structural, not patchy.** Move the controller into a
+dedicated `StatefulWidget` so the State's `dispose()` runs only
+after the Element is unmounted (which the framework guarantees
+happens after the exit animation):
+
+```dart
+class _ConfirmEraseDialog extends StatefulWidget { … }
+class _ConfirmEraseDialogState extends State<_ConfirmEraseDialog> {
+  final _controller = TextEditingController();
+  @override void dispose() { _controller.dispose(); super.dispose(); }
+  // … build returns AlertDialog with the TextField …
+}
+
+await showDialog<bool>(
+  context: context,
+  builder: (_) => const _ConfirmEraseDialog(),
+);
+```
+
+We applied this pattern to every dialog in the codebase that owns a
+controller: `_ConfirmEraseDialog`, `_ChangeMasterPasswordDialog`, and
+`_PhraseRevealDialog`.
+
+### 10.8 The "swap tree mid-exit" race (the second bug that bit us)
+
+Sister problem to §10.7, different symptom. The buggy pattern:
+
+```dart
+final ok = await showDialog<bool>(context: context, builder: …);
+if (ok != true) return;
+vault.lock();                // ← swaps AppShell → LoginScreen
+// or: await vault.resetVault()  // same swap
+```
+
+**The bug:** `vault.lock()` calls `notifyListeners()` which causes
+`MaterialApp.home` to flip from `AppShell` to `LoginScreen`. If
+this happens while the dialog overlay is still animating out, the
+overlay's render objects are being painted against a tree that's
+already being deactivated. You get:
+
+- `'is not true.' RenderObject reference box not attached`
+- `RenderFlex overflowed by 99876 pixels` (yellow/black stripes)
+
+**The fix:** wait for the dialog's exit animation before swapping
+the tree:
+
+```dart
+final ok = await showDialog<bool>(context: context, builder: …);
+if (ok != true || !mounted) return;
+await Future.delayed(const Duration(milliseconds: 280));
+if (!mounted) return;
+vault.lock();
+```
+
+280 ms is empirically the Material default dialog exit duration
+(200 ms) plus a small safety margin. Applied to both `_lock()` in
+`vault_page.dart` and `_confirmErase` in `settings_page.dart`. The
+auto-lock timer also bumps its `onLock()` callback through
+`WidgetsBinding.instance.addPostFrameCallback` so a timer that fires
+mid-build doesn't trigger the same race.
+
+### 10.9 Tab-switching: `IndexedStack` + `TickerMode` + `RepaintBoundary`
+
+The naive implementation of `app_shell.dart` was:
+
+```dart
+Expanded(child: pages[_index]),   // ← rebuilds whole subtree on switch
+```
+
+Every tab switch unmounted the previous page's `State` (losing
+search query, scroll position, in-flight controllers) and mounted
+the next one (running `initState`, restarting animations, re-fetching
+lists). Vault → Generator stuttered for ~200 ms.
+
+The current implementation pairs three Flutter primitives:
+
+```dart
+IndexedStack(
+  index: _index,
+  children: [
+    for (var i = 0; i < pages.length; i++)
+      TickerMode(
+        enabled: i == _index,
+        child: RepaintBoundary(child: pages[i]),
+      ),
+  ],
+);
+```
+
+Each primitive solves one specific problem:
+
+| Primitive | What it does | Why we need it |
+|---|---|---|
+| `IndexedStack` | Keeps every child mounted, paints only the visible one | Preserves state across tab switches. Switch becomes paint-only — no `initState`/`dispose` churn |
+| `TickerMode(enabled: …)` | Pauses every `AnimationController` whose `Ticker` is under this scope when disabled | Off-screen pages stop burning CPU on their idle animations (Security Center pulse, lock-glow breath, etc.) |
+| `RepaintBoundary` | Promotes its subtree to its own paint layer; the engine caches the layer and only repaints dirty children | A repaint inside Settings (typing in the master-password field) can't invalidate the cached Vault layer behind it |
+
+The combination means tab switching after the first visit is
+**instantaneous** and we never spend frame budget rendering pages
+the user can't see.
+
+### 10.10 CustomPainter shader caching
+
+The login screen has two heavy painters that run continuously:
+
+- **Matrix rain** at ~28 fps (via a `Timer.periodic` and a
+  `ValueNotifier<int>` clock).
+- **Vault lock** at ~60 fps (via a 4-second `..repeat(reverse: true)`
+  idle controller).
+
+Both painters were calling `RadialGradient.createShader(...)` and
+`LinearGradient.createShader(...)` inside `paint()`. That meant a
+fresh `Shader` object allocated per frame, per gradient — which on
+the lock alone was 60 shaders/sec for the body + 60 for the shackle.
+The shader objects themselves aren't huge, but the constant
+allocation pressure was visibly starving the input-thread keystroke
+processing pipeline.
+
+**The fix** is the classic CustomPainter optimisation:
+
+```dart
+class _LockShaderCache {
+  _LockShaderCache(this.size, this.body, this.shackle);
+  final Size size;
+  final Shader body, shackle;
+}
+
+_LockShaderCache? _lockShaderCache;   // process-wide
+
+_LockShaderCache _shadersFor(Size size, Offset center, double bodyR) {
+  final cached = _lockShaderCache;
+  if (cached != null && cached.size.width.round() == size.width.round() …) {
+    return cached;                       // reuse
+  }
+  final body = const RadialGradient(...).createShader(…);
+  final shackle = const LinearGradient(...).createShader(…);
+  final fresh = _LockShaderCache(size, body, shackle);
+  _lockShaderCache = fresh;
+  return fresh;
+}
+```
+
+The key insight is that **shader binding is cheap once the shader
+exists** — the expensive part is constructing the gradient
+coefficients and uploading them. We pay that once per window-size
+change, then reuse forever. The same pattern is applied to the
+matrix's radial background (`_MatrixBgCache`).
+
+### 10.11 Cutting the most expensive blur passes
+
+`MaskFilter.blur(BlurStyle.normal, radius)` is Skia's gaussian
+blur, and its cost is **O(radius²)**. We had three offenders on the
+login screen:
+
+- The matrix painter's hover aura, `MaskFilter.blur(40)`, drawn over
+  the full hover region every frame. At 28 fps that's a 1,600-unit
+  blur 28×/sec. Removed entirely — the pointer parallax already
+  shifts the columns toward the cursor, so the aura was decorative
+  double-coverage.
+- Per-glyph `Shadow(blurRadius: 6)` on every matrix "head"
+  character. Each `Shadow` forces an off-screen blur pass *per
+  character*. With ~80 columns, that's 80 blur passes per frame.
+  Removed — heads stay bright cyan and the eye still reads them
+  as glowing.
+- The lock's outer aura `MaskFilter.blur(28)` was kept (it's the
+  signature visual of the lock) but its alpha is animated, not its
+  radius — so Skia can cache the blurred bitmap and re-tint it.
+
+Combined with the shader cache from §10.10, the login screen's
+per-frame cost dropped enough that typing in the password field is
+indistinguishable from a native text input.
+
+### 10.12 `RepaintBoundary` discipline on the login screen
+
+Even with cheap painters, the engine merges dirty rects up the
+render tree until it hits a `RepaintBoundary`. That means a cursor
+blink inside the password field — which is repainting at the
+cursor's blink rate — was invalidating the entire `SafeArea` and
+forcing the engine to redo the matrix layer + the brand wordmark
+layer.
+
+The login screen now has four strategic boundaries:
+
+1. `RepaintBoundary` around the matrix shower (already there).
+2. `RepaintBoundary` around `_BrandHero` so the wordmark's shimmer
+   never invalidates the auth card.
+3. `RepaintBoundary` around the entire auth card (the right column
+   in the wide layout) so typing in the password field can't dirty
+   the hero panel.
+4. `RepaintBoundary` around `VaultLockAnimation` and around the
+   password pill individually, so the lock's 60 fps idle paint and
+   the password pill's cursor-blink paint stay in their own
+   layers.
+
+These five boundaries are the difference between "typing feels
+laggy" and "typing feels like a native text field" — same machine,
+same code, just a tighter dirty-region scope.
+
+### 10.13 Dim-overlay opacity and matrix visibility
+
+A small but visible win: the dim overlay above the matrix was at
+`alpha 0.86 / 0.92` which crushed the rain down to faint hints.
+Users reported "background animations are not visible." Reducing to
+`alpha 0.55 / 0.62` lets the matrix breathe through while keeping
+the auth card readable on top of its own opaque-ish surface.
+
+The rule of thumb: dim overlays should sit just below the
+*minimum* readability threshold for the foreground content, not at
+"definitely-readable-everywhere" levels. Test against the brightest
+fluid background, not against a static reference.
+
+### 10.14 Summary table — UX patterns and what they protect against
+
+| Pattern | What it costs | What it protects |
+|---|---|---|
+| Tagged-union `Credential` w/ `ItemKind.fromWire` | One enum + one editor that adapts | Forward compatibility, single editor codebase |
+| Password DNA visual fingerprint | One `StatelessWidget` + SHA-256 | Silent password reuse detection |
+| `RevealHold` press-and-hold | One `StatefulWidget` | Shoulder-surf when user is away from screen |
+| Recovery Hub on login (no destructive option visible) | Bottom-sheet redesign | Accidental erasure under password-forget panic |
+| `Test recovery phrase` (read-only) | One method on `LocalVaultManager` | "Phrase I never tested" failure mode |
+| `_PhraseRevealDialog` w/ Emergency Kit button | Dedicated `StatefulWidget` + plaintext writer | Lost phrase = lost vault failure mode |
+| `IndexedStack + TickerMode + RepaintBoundary` per tab | Three lines in `_buildPageBody` | State loss + CPU burn on tab switch |
+| Shader caches in `CustomPainter` | One `_…ShaderCache` class per painter | Frame-budget starvation on continuous animations |
+| `MaskFilter.blur` removal | Slight visual change | GPU stall on continuous repaints |
+| Dialog `StatefulWidget` refactor | `dispose()` lifecycle is framework-owned | `TextEditingController used after being disposed` crash |
+| 280 ms post-dialog delay before tree mutation | One `await Future.delayed` | `is not true.` overlay-vs-AppShell swap crash |
+| `addPostFrameCallback` for auto-lock | One callback wrapper | mid-build `notifyListeners` tearing down `Consumer` |
+
+> When asked **"what would you change about your project today,"** lead
+> with the entries from this table — they show you can write code
+> *and* reason about why it broke. That combination is rare in
+> early-career interviews.
+
+---
+
+## 11. Why Flutter Desktop?
 
 Be ready to defend the stack choice. Honest tradeoffs:
 
@@ -944,7 +1551,7 @@ The choice was made because:
 
 ---
 
-## 11. What's NOT in Scope (Honest Tradeoffs)
+## 12. What's NOT in Scope (Honest Tradeoffs)
 
 In an interview, **volunteering what your project doesn't do** is one
 of the strongest signals of engineering maturity. Be ready with this
@@ -966,10 +1573,35 @@ list:
   product.
 - ❌ **No multi-user / sharing.** One vault per OS user.
 - ❌ **No formal security audit.** A real product would commission one.
+- ❌ **No soft-delete / trash bin.** Deleting an entry is immediate
+  and irreversible. A 30-day undo bin is a reasonable next addition
+  but isn't shipped.
+- ❌ **No CSV import.** Moving from a previous password manager
+  requires manual re-entry today. CSV import is on the roadmap but
+  raises non-trivial threat-model questions (a CSV on disk is a
+  plaintext leak surface) that we haven't designed for yet.
+- ❌ **Emergency Kit is plaintext.** Intentional (see §6.11) — the
+  user manages physical storage of it. But we don't *prevent* a user
+  from leaving it on their desktop, and we don't watermark the file
+  if exfiltrated.
+- ❌ **No keyboard-activity auto-lock bump.** `SessionGuard` only
+  listens to pointer events; keystrokes do not reset the idle timer.
+  A user typing into the password field for 5 minutes would
+  technically auto-lock mid-edit. Easy fix (`Focus` + raw keyboard
+  listener), not yet shipped.
+
+What we *used* to call out here and **have since shipped**:
+
+- ✅ **Master-password rotation while logged in** — §6.10.
+- ✅ **Printable Emergency Kit export** — §6.11.
+- ✅ **Diceware-style passphrase generation** — §10.5.
+- ✅ **Read-only phrase verification (Test phrase)** — §10.3.
+- ✅ **Command palette (Ctrl+K)** — §10.6.
+- ✅ **Multi-kind items (logins / notes / cards)** — §10.1.
 
 ---
 
-## 12. Cybersecurity Interview Q&A
+## 13. Cybersecurity Interview Q&A
 
 This section is the gold. Practice answering each question out loud.
 
@@ -1481,9 +2113,161 @@ copy?**
 > best-effort key zeroing, dark titlebar via DWM, native Windows Hello
 > via WinRT method channel — no third-party plugin, no network.
 
+### H. Product / UX architecture (recent additions)
+
+**Q39. Walk me through exactly what happens when the user changes
+their master password.**
+
+(Cover §6.10 from memory.) Vault must be unlocked, so we have the
+MDK in memory. We re-derive `K_pwd_current` from the typed current
+password, unwrap `wrap.pwd`, and **compare the unwrapped bytes
+against the in-memory MDK with a length-prefixed XOR-fold loop**
+(`_bytesEqual`). If they don't match, we return "Current password
+is incorrect" and touch zero files. If they match, we generate a
+fresh 32-byte password salt, derive `K_pwd_new` at PBKDF2-600k,
+encrypt the in-memory MDK with the new key, and atomically write
+`salt.salt` and `wrap.pwd`. Two file writes. `vault.json`,
+`verify.key`, `wrap.phrase`, `wrap.device`, and the intrusion log
+are all untouched. Recovery phrase and biometric quick-unlock keep
+working without any user action. This is the entire point of having
+an MDK — operational, not cryptographic.
+
+**Q40. Why is the Emergency Kit plaintext? Isn't that a leak?**
+
+It is a leak **the moment it lives on the file system**. That's
+exactly why we (a) only generate it on explicit user request, (b)
+surface the full path in a snackbar with a one-tap COPY PATH
+button so the user can immediately move the file off disk, and (c)
+include "Treat this document like cash" as the header and footer of
+the file itself. The threat model for the Emergency Kit is
+**physical storage** — a printed copy in a safe, in a sealed
+envelope in a safety-deposit box, etc. If we encrypted the kit,
+the user would need a separate secret to decrypt it, which
+recursively re-creates the original "I forgot my master password"
+problem. The only solid alternative would be a Shamir-secret-shared
+QR code, which is a real future enhancement, but is non-trivial
+both to implement and to explain to non-technical users at
+recovery time.
+
+**Q41. Why a 1,000-word Diceware list and not the BIP-39 2,048-word
+list for the passphrase generator?**
+
+Different threat model. BIP-39's 24-word phrase is the *recovery
+secret for the entire vault* — every word must add precious bits
+because forgetting the phrase = losing the vault. So we use the
+2,048-word standard for 264 bits of entropy. The Diceware
+passphrase generator is for *everyday vault entries the user has
+to type out* — Wi-Fi passwords, secondary emails, anything not
+stored under the master vault. There the trade-off shifts toward
+memorability: a 5-word phrase from 1,000 words is ~50 bits, easily
+strong enough for a per-account password, and dramatically easier
+to type. Different stakes, different list.
+
+**Q42. Explain Password DNA and why it's safe to display.**
+
+It's the first 6 bytes of SHA-256(password) rendered as 6
+coloured cells. Two security properties matter:
+
+1. **Identical passwords produce identical pictures**, so the user
+   sees password reuse across entries at a glance, without anyone
+   needing to reveal the actual passwords.
+2. **The visual space is ~2⁴⁸**, large enough that reversing a
+   low-entropy password from its picture alone is infeasible — and
+   we render only the picture, never the hex. SHA-256 is preimage-
+   resistant, so even if a viewer photographed the strip, recovering
+   the password is no easier than brute-forcing the hash directly.
+
+It does intentionally leak the "these N entries share a password"
+fact — but that *is* the feature. The user should know.
+
+**Q43. Why did you replace `Erase vault` on the login screen with a
+`Recovery options` menu and a separate Settings-only erase?**
+
+Two security-product instincts:
+
+1. **Destructive options at peer level with non-destructive ones
+   are an anti-pattern.** A frustrated user who can't unlock will
+   reflexively click "Erase" if it looks like just another option
+   next to "Recover." Moving destruction off the lock screen
+   prevents a panicked tap from torching the vault.
+2. **You shouldn't be able to authorise destruction when you can't
+   authorise anything else.** Erasure on the lock screen has no
+   authentication. Gating it behind a Settings-only "Type ERASE"
+   confirmation that requires the vault to already be unlocked
+   means the only person who can erase the vault is someone who
+   has already proved possession of the master password.
+
+It's the same logic that puts "Delete account" under Settings in
+every well-designed app, not next to the login button.
+
+**Q44. Tell me about a bug you fixed and what it taught you.**
+
+Pick one of the two from §10.7 / §10.8. The
+`TextEditingController used after being disposed` crash is the
+crisper story: `await showDialog` resolves at `Navigator.pop` time,
+but Flutter keeps the dialog mounted for the ~200 ms exit
+animation. If you `dispose()` the controller you owned in the
+calling function before that animation finishes, the next rebuild
+inside the dialog touches a disposed controller. Lesson: **don't
+own object lifecycles across `await showDialog` boundaries**. Move
+the controller into a `StatefulWidget` whose `dispose()` runs only
+when the framework removes the Element — which it guarantees
+happens after the exit animation. The fix is structural, not a
+band-aid.
+
+**Q45. How does your IndexedStack + TickerMode pattern work, and
+why isn't an IndexedStack alone enough?**
+
+`IndexedStack` keeps every child mounted but only paints the
+selected one. That preserves State across tab switches (search
+queries, scroll positions, in-flight controllers) — which is the
+primary goal. But the off-screen children are *still building*,
+which means their `AnimationController`s keep ticking under their
+`Ticker`s. So you've eliminated mount-time cost but you're now
+burning CPU on animations the user can't see. Wrapping each child
+in `TickerMode(enabled: i == _index)` disables every Ticker in the
+subtree when the page is hidden, so animations literally pause and
+resume across switches. Adding `RepaintBoundary` per child is the
+third ingredient: it gives each page its own paint layer so a
+repaint inside Settings can't dirty the cached Vault layer behind
+it. All three together = tab switching is essentially free.
+
+**Q46. Walk me through the shader caching optimisation. Why was it
+necessary?**
+
+Two `CustomPainter`s on the login screen — the matrix rain at ~28
+fps and the vault lock at ~60 fps — were calling
+`RadialGradient.createShader()` and `LinearGradient.createShader()`
+inside `paint()`. That means a fresh `Shader` object allocated per
+frame, per gradient. The lock alone was creating 120 shaders per
+second between the body and the shackle. The shader objects are
+small but the allocation churn — plus the upload to the GPU each
+time — was visibly starving the input thread, so typing in the
+password field felt sticky. The fix is to cache the shaders in a
+top-level `_LockShaderCache` keyed by the painter's Size and only
+recreate when the size changes (i.e., once per window resize).
+After: same visuals, ~zero shader allocations during animation,
+and the keystroke latency drops to native-text-input territory. The
+same pattern works for the matrix's radial background.
+
+**Q47. Why don't you ship a network breach-check (HaveIBeenPwned)?**
+
+Three reasons. First, the headline feature of the app is
+zero-knowledge / offline. Adding a network call — even a
+k-anonymous one — breaks that promise and changes the threat model.
+Second, the API call leaks the *fact that the user is checking this
+password*, which is a metadata side-channel some users object to.
+Third, doing breach-check locally would require either bundling
+the full ~12 GB HIBP database into the app, which is impractical,
+or downloading on demand, which is the same network problem
+disguised. The right shape for breach-check in our model would be
+a future "import a locally-downloaded HIBP bloom filter from
+Settings" toggle — explicit, opt-in, and fully offline once
+configured. Not shipped yet.
+
 ---
 
-## 13. Glossary
+## 14. Glossary
 
 - **AEAD** — Authenticated Encryption with Associated Data. A primitive
   that gives both confidentiality and integrity in one go.
@@ -1494,18 +2278,45 @@ copy?**
 - **BIP-39** — Bitcoin Improvement Proposal 39. The mnemonic seed phrase
   standard.
 - **CSPRNG** — Cryptographically Secure Pseudo-Random Number Generator.
+- **Diceware** — Passphrase generation scheme. Each word is drawn
+  uniformly from a fixed word list; the entropy per word is
+  log₂(list size).
 - **DPAPI** — Data Protection API on Windows. OS-managed per-user key
   storage.
+- **Emergency Kit** — A user-generated printable plaintext document
+  containing the 24-word recovery phrase + restoration steps. Intended
+  for physical (not digital) storage. See §6.11.
+- **Forbidden attack on GCM** — Nonce reuse under the same key reveals
+  the GHASH subkey H, breaking authenticity universally for that key.
+  This is why every GCM encryption needs a fresh nonce.
 - **GCM** — Galois/Counter Mode. The AEAD mode of AES we use.
 - **GHASH** — The Galois-field universal hash inside GCM.
 - **HMAC** — Hash-based Message Authentication Code.
 - **HSM** — Hardware Security Module.
+- **IndexedStack** — Flutter widget that keeps every child in the
+  Element tree but only paints the selected one. Preserves State
+  across switches; pair with `TickerMode` to pause off-screen
+  animations.
+- **ItemKind** — Cipher Nest's tagged-union discriminator over a
+  single `Credential` class. Values are `login`, `note`, `card`.
+  Forward-compatible: unknown wire values fall back to `login`.
 - **KDF** — Key Derivation Function. PBKDF2, scrypt, Argon2, HKDF…
 - **MDK** — Master Data Key. The random 32-byte key that actually
   encrypts vault entries.
 - **Nonce / IV** — Number-used-once / Initialization Vector. Per-message
   unique input to the cipher.
+- **Password DNA** — Cipher Nest's visual fingerprint widget. SHA-256
+  of the password rendered as 6 coloured cells; identical passwords
+  produce identical pictures. See §10.2.
 - **PBKDF2** — Password-Based KDF #2 (RFC 8018). Iterated PRF.
+- **RepaintBoundary** — Flutter widget that promotes its subtree to a
+  dedicated paint layer. Cached by the engine, only repaints when
+  its own children are dirty. Used to isolate the matrix, the brand
+  hero, the auth card, the lock animation, and the password pill on
+  the login screen.
+- **TickerMode** — Flutter widget that enables or disables every
+  `Ticker` in its subtree. Used per-child inside our `IndexedStack`
+  so off-screen pages stop animating.
 - **TPM** — Trusted Platform Module. Hardware key storage chip.
 - **WinRT** — Windows Runtime. The modern Windows API surface.
 - **Wrap / Unwrap** — Encrypt / decrypt a key with another key.
